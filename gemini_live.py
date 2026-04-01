@@ -1,11 +1,123 @@
 import asyncio
 import inspect
 import logging
+import re
 import traceback
+from typing import Any
 
 logger = logging.getLogger(__name__)
 from google import genai
 from google.genai import types
+
+PASSWORD_PATH_STEPS = [
+    'Click "Forgot Password" on the login page.',
+    "Enter your email, username, or phone number.",
+    "Check email or SMS for a reset link or code.",
+    "Use the link or code to set a new password.",
+    "Log in with your new password.",
+]
+
+CITRIX_PATH_STEPS = [
+    "Check internet connection.",
+    "Verify username and password.",
+    "Update Citrix Workspace to the latest version.",
+    "Clear cache or temp files, then restart the app.",
+    "Try another browser or device.",
+]
+
+VPN_PATH_STEPS = [
+    "Check internet connection.",
+    "Verify username and password.",
+    "Update VPN client to the latest version.",
+    "Clear cache and restart the app or device.",
+    "Try another network, such as mobile hotspot.",
+]
+
+HELPDESK_ESCALATION = "Please contact IT Helpdesk for manual assistance."
+MAX_EMPLOYEE_ID_ATTEMPTS = 3
+
+
+def get_password_support_path():
+    return {
+        "issue_type": "password",
+        "steps": PASSWORD_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
+def get_citrix_support_path():
+    return {
+        "issue_type": "citrix",
+        "steps": CITRIX_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
+def get_vpn_support_path():
+    return {
+        "issue_type": "vpn",
+        "steps": VPN_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
+def get_all_support_paths_summary():
+    return {
+        "issue_types": ["password", "citrix", "vpn"],
+        "summary": {
+            "password": "Reset password using Forgot Password and retry login.",
+            "citrix": "Check internet and credentials, then update and restart Citrix Workspace.",
+            "vpn": "Check internet and credentials, then update VPN client and retry on another network.",
+        },
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
+def validate_employee_id(employee_id: str):
+    cleaned = re.sub(r"\D", "", str(employee_id or ""))
+    is_valid = len(cleaned) == 4
+    return {
+        "is_valid": is_valid,
+        "employee_id": cleaned if is_valid else None,
+        "message": "Employee ID verified." if is_valid else "Invalid employee ID. Please provide a 4-digit employee ID.",
+    }
+
+
+IT_SUPPORT_SYSTEM_INSTRUCTION = """
+You are an IT Helpdesk voice bot for login support calls.
+
+Primary behavior:
+- Keep responses short, clear, and step-by-step.
+- Ask only one question at a time.
+- Wait for user confirmation before moving to the next step.
+- Stay on this IT support use case only.
+
+Conversation flow:
+1) Start with: "Thank you for calling. Please say your employee ID."
+2) Validate the employee ID by calling tool validate_employee_id.
+3) If validation fails, ask for employee ID again and do not continue.
+4) After successful validation, confirm with: "Thank you for providing employee ID <ID>. How can I help you today?"
+3) Ask them to choose exactly one issue type:
+    - Password issue
+    - Citrix issue
+    - VPN login issue
+
+Extra rules:
+- Supported reply languages are: English, Telugu, Marathi, Bangla.
+- If you receive a control message in format "LANGUAGE_PREF: <Language>", switch reply language immediately.
+- After language is set, reply only in that language until a new LANGUAGE_PREF message arrives.
+- Do not send a standalone acknowledgement for LANGUAGE_PREF control messages.
+- Do not provide troubleshooting steps until employee ID is validated.
+- Allow at most 3 invalid employee ID attempts.
+- On the 3rd invalid attempt, stop verification and instruct caller to contact IT Helpdesk.
+- If the issue type is unclear, ask them to choose Password, Citrix, or VPN.
+- If user asks for all options, call tool get_all_support_paths_summary and summarize briefly.
+- When user selects Password issue, call tool get_password_support_path.
+- When user selects Citrix issue, call tool get_citrix_support_path.
+- When user selects VPN login issue, call tool get_vpn_support_path.
+- After tool result, guide the user through steps one by one and use tool escalation message when needed.
+- Be polite and supportive, but do not add unrelated troubleshooting steps.
+""".strip()
 
 class GeminiLive:
     """
@@ -26,8 +138,126 @@ class GeminiLive:
         self.model = model
         self.input_sample_rate = input_sample_rate
         self.client = genai.Client(api_key=api_key)
-        self.tools = tools or []
-        self.tool_mapping = tool_mapping or {}
+        self.validated_employee_id = None
+        self.employee_id_attempts = 0
+        self.tools = tools or [
+            {
+                "function_declarations": [
+                    {
+                        "name": "validate_employee_id",
+                        "description": "Validates a caller employee ID. Only 4-digit numeric IDs are accepted.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "employee_id": {
+                                    "type": "string",
+                                    "description": "Employee ID provided by caller."
+                                }
+                            },
+                            "required": ["employee_id"],
+                        },
+                    },
+                    {
+                        "name": "get_password_support_path",
+                        "description": "Returns the approved troubleshooting steps for password login issues.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "get_citrix_support_path",
+                        "description": "Returns the approved troubleshooting steps for Citrix login issues.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "get_vpn_support_path",
+                        "description": "Returns the approved troubleshooting steps for VPN login issues.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "get_all_support_paths_summary",
+                        "description": "Returns a short summary for all support paths: password, Citrix, and VPN.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                ]
+            }
+        ]
+        self.tool_mapping = tool_mapping or {
+            "validate_employee_id": self._validate_employee_id,
+            "get_password_support_path": self._get_password_support_path,
+            "get_citrix_support_path": self._get_citrix_support_path,
+            "get_vpn_support_path": self._get_vpn_support_path,
+            "get_all_support_paths_summary": self._get_all_support_paths_summary,
+        }
+
+    def _validation_required_response(self):
+        return {
+            "error": "EMPLOYEE_ID_REQUIRED",
+            "message": "Employee ID verification is required before troubleshooting.",
+            "next_action": "Ask caller for a 4-digit employee ID and call validate_employee_id.",
+        }
+
+    def _validate_employee_id(self, employee_id: str):
+        result = validate_employee_id(employee_id)
+        if result["is_valid"]:
+            self.validated_employee_id = result["employee_id"]
+            self.employee_id_attempts = 0
+            result["attempts_used"] = 0
+            result["attempts_remaining"] = MAX_EMPLOYEE_ID_ATTEMPTS
+            return result
+
+        self.employee_id_attempts += 1
+        attempts_remaining = max(0, MAX_EMPLOYEE_ID_ATTEMPTS - self.employee_id_attempts)
+        result["attempts_used"] = self.employee_id_attempts
+        result["attempts_remaining"] = attempts_remaining
+
+        if self.employee_id_attempts >= MAX_EMPLOYEE_ID_ATTEMPTS:
+            result["blocked"] = True
+            result["error"] = "EMPLOYEE_ID_MAX_ATTEMPTS_REACHED"
+            result["message"] = (
+                "Maximum employee ID attempts reached. "
+                "Please contact IT Helpdesk for manual assistance."
+            )
+            result["escalation"] = HELPDESK_ESCALATION
+        return result
+
+    def _get_password_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_password_support_path()
+        result["employee_id"] = self.validated_employee_id
+        return result
+
+    def _get_citrix_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_citrix_support_path()
+        result["employee_id"] = self.validated_employee_id
+        return result
+
+    def _get_vpn_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_vpn_support_path()
+        result["employee_id"] = self.validated_employee_id
+        return result
+
+    def _get_all_support_paths_summary(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_all_support_paths_summary()
+        result["employee_id"] = self.validated_employee_id
+        return result
 
     async def start_session(self, audio_input_queue, video_input_queue, text_input_queue, audio_output_callback, audio_interrupt_callback=None):
         config = types.LiveConnectConfig(
@@ -39,14 +269,15 @@ class GeminiLive:
                     )
                 )
             ),
-            system_instruction=types.Content(parts=[types.Part(text="You are a helpful AI assistant. Keep your responses concise. Speak in a friendly Irish accent. You can see the user's camera or screen which is shared as realtime input images with you.")]),
+            system_instruction=types.Content(parts=[types.Part(text=IT_SUPPORT_SYSTEM_INSTRUCTION)]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
-                turn_coverage="TURN_INCLUDES_ONLY_ACTIVITY",
+                turn_coverage=types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
             ),
             tools=self.tools,
         )
+        
         
         logger.info(f"Connecting to Gemini Live with model={self.model}")
         try:
@@ -108,7 +339,7 @@ class GeminiLive:
                             
                             if server_content:
                                 if server_content.model_turn:
-                                    for part in server_content.model_turn.parts:
+                                    for part in (server_content.model_turn.parts or []):
                                         if part.inline_data:
                                             if inspect.iscoroutinefunction(audio_output_callback):
                                                 await audio_output_callback(part.inline_data.data)
@@ -134,8 +365,10 @@ class GeminiLive:
 
                             if tool_call:
                                 function_responses = []
-                                for fc in tool_call.function_calls:
+                                for fc in (tool_call.function_calls or []):
                                     func_name = fc.name
+                                    if not func_name:
+                                        continue
                                     args = fc.args or {}
                                     
                                     if func_name in self.tool_mapping:

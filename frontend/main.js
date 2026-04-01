@@ -15,11 +15,38 @@ const videoPreview = document.getElementById("video-preview");
 const videoPlaceholder = document.getElementById("video-placeholder");
 const connectBtn = document.getElementById("connectBtn");
 const chatLog = document.getElementById("chat-log");
+const toolLog = document.getElementById("tool-log");
+const languageSelect = document.getElementById("languageSelect");
+const activeLanguageBadge = document.getElementById("activeLanguageBadge");
 
 let currentGeminiMessageDiv = null;
 let currentUserMessageDiv = null;
+let geminiStreamState = { accumulated: "", lastChunk: "" };
+let userStreamState = { accumulated: "", lastChunk: "" };
 
 const mediaHandler = new MediaHandler();
+
+function getSelectedLanguageName() {
+  const value = (languageSelect?.value || "english").toLowerCase();
+  if (value === "telugu") return "Telugu";
+  if (value === "marathi") return "Marathi";
+  if (value === "bangla") return "Bangla";
+  return "English";
+}
+
+function updateLanguageBadge() {
+  if (activeLanguageBadge) {
+    activeLanguageBadge.textContent = getSelectedLanguageName();
+  }
+}
+
+function sendLanguagePreference() {
+  const selectedLanguage = getSelectedLanguageName();
+  geminiClient.sendText(
+    `LANGUAGE_PREF: ${selectedLanguage}. Respond only in ${selectedLanguage} until language is changed again. This is a control update; do not send a standalone reply for this message.`
+  );
+}
+
 const geminiClient = new GeminiClient({
   onOpen: () => {
     statusDiv.textContent = "Connected";
@@ -27,11 +54,10 @@ const geminiClient = new GeminiClient({
     authSection.classList.add("hidden");
     appSection.classList.remove("hidden");
 
-    // Send hidden instruction
+    // Use a single startup turn to avoid duplicate model responses.
+    const selectedLanguage = getSelectedLanguageName();
     geminiClient.sendText(
-      `System: Introduce yourself as a demo of the Gemini Live API.
-       Suggest playing with features like the native audio for accents and multilingual support.
-       Keep the intro concise and friendly.`
+      `LANGUAGE_PREF: ${selectedLanguage}. Respond only in ${selectedLanguage} until language is changed again. Start now. Greet the caller and ask for employee ID.`
     );
   },
   onMessage: (event) => {
@@ -64,24 +90,64 @@ function handleJsonMessage(msg) {
     mediaHandler.stopAudioPlayback();
     currentGeminiMessageDiv = null;
     currentUserMessageDiv = null;
+    geminiStreamState = { accumulated: "", lastChunk: "" };
+    userStreamState = { accumulated: "", lastChunk: "" };
   } else if (msg.type === "turn_complete") {
     currentGeminiMessageDiv = null;
     currentUserMessageDiv = null;
+    geminiStreamState = { accumulated: "", lastChunk: "" };
+    userStreamState = { accumulated: "", lastChunk: "" };
   } else if (msg.type === "user") {
-    if (currentUserMessageDiv) {
-      currentUserMessageDiv.textContent += msg.text;
-      chatLog.scrollTop = chatLog.scrollHeight;
-    } else {
-      currentUserMessageDiv = appendMessage("user", msg.text);
-    }
+    currentUserMessageDiv = appendStreamingText(
+      "user",
+      msg.text,
+      currentUserMessageDiv,
+      userStreamState
+    );
   } else if (msg.type === "gemini") {
-    if (currentGeminiMessageDiv) {
-      currentGeminiMessageDiv.textContent += msg.text;
-      chatLog.scrollTop = chatLog.scrollHeight;
-    } else {
-      currentGeminiMessageDiv = appendMessage("gemini", msg.text);
-    }
+    currentGeminiMessageDiv = appendStreamingText(
+      "gemini",
+      msg.text,
+      currentGeminiMessageDiv,
+      geminiStreamState
+    );
+  } else if (msg.type === "tool_call") {
+    appendToolEvent(msg);
   }
+}
+
+function appendStreamingText(role, chunkText, messageDiv, streamState) {
+  if (!chunkText) return messageDiv;
+
+  if (!messageDiv) {
+    streamState.accumulated = chunkText;
+    streamState.lastChunk = chunkText;
+    return appendMessage(role, chunkText);
+  }
+
+  // Handle cumulative transcripts: model sends full text-so-far.
+  if (chunkText.startsWith(streamState.accumulated)) {
+    const delta = chunkText.slice(streamState.accumulated.length);
+    if (delta) {
+      messageDiv.textContent += delta;
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+    streamState.accumulated = chunkText;
+    streamState.lastChunk = chunkText;
+    return messageDiv;
+  }
+
+  // Ignore exact repeated chunks.
+  if (chunkText === streamState.lastChunk || streamState.accumulated.endsWith(chunkText)) {
+    return messageDiv;
+  }
+
+  // Fallback for true delta chunks.
+  messageDiv.textContent += chunkText;
+  chatLog.scrollTop = chatLog.scrollHeight;
+  streamState.accumulated += chunkText;
+  streamState.lastChunk = chunkText;
+  return messageDiv;
 }
 
 function appendMessage(type, text) {
@@ -91,6 +157,40 @@ function appendMessage(type, text) {
   chatLog.appendChild(msgDiv);
   chatLog.scrollTop = chatLog.scrollHeight;
   return msgDiv;
+}
+
+function appendToolEvent(msg) {
+  if (!toolLog) return;
+  const eventDiv = document.createElement("div");
+  eventDiv.className = "tool-event";
+  const result = msg.result || {};
+  const isBlocked = Boolean(result.blocked);
+  if (isBlocked) {
+    eventDiv.classList.add("tool-event-warning");
+  }
+
+  const title = document.createElement("div");
+  title.className = "tool-event-title";
+  let titleText = `Tool: ${msg.name}`;
+  if (typeof result.attempts_used === "number") {
+    titleText += ` | Attempts: ${result.attempts_used}`;
+    if (typeof result.attempts_remaining === "number") {
+      titleText += ` | Remaining: ${result.attempts_remaining}`;
+    }
+  }
+  if (isBlocked) {
+    titleText += " | Escalated";
+  }
+  title.textContent = titleText;
+
+  const body = document.createElement("pre");
+  body.className = "tool-event-body";
+  body.textContent = JSON.stringify(result, null, 2);
+
+  eventDiv.appendChild(title);
+  eventDiv.appendChild(body);
+  toolLog.appendChild(eventDiv);
+  toolLog.scrollTop = toolLog.scrollHeight;
 }
 
 // Connect Button Handler
@@ -225,6 +325,9 @@ function resetUI() {
   cameraBtn.textContent = "Start Camera";
   screenBtn.textContent = "Share Screen";
   chatLog.innerHTML = "";
+  if (toolLog) {
+    toolLog.innerHTML = "";
+  }
   connectBtn.disabled = false;
 }
 
@@ -238,3 +341,14 @@ function showSessionEnd() {
 restartBtn.onclick = () => {
   resetUI();
 };
+
+updateLanguageBadge();
+
+if (languageSelect) {
+  languageSelect.addEventListener("change", () => {
+    updateLanguageBadge();
+    if (geminiClient.isConnected()) {
+      sendLanguagePreference();
+    }
+  });
+}

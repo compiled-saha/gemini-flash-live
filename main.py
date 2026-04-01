@@ -82,6 +82,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             image_data = base64.b64decode(payload["data"])
                             await video_input_queue.put(image_data)
                             continue
+                        if isinstance(payload, dict) and "text" in payload:
+                            await text_input_queue.put(str(payload["text"]))
+                            continue
                     except json.JSONDecodeError:
                         pass
 

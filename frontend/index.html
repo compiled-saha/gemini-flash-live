@@ -3,14 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gemini Live API Demo</title>
+    <title>IT Support Voice Assistant</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <div class="container">
       <header>
-        <h1>Gemini Live API Demo</h1>
+        <h1>IT Support Voice Assistant</h1>
         <div style="display: flex; gap: 10px; align-items: center">
+          <label for="languageSelect"><strong>Reply Language:</strong></label>
+          <select id="languageSelect">
+            <option value="english" selected>English</option>
+            <option value="telugu">Telugu</option>
+            <option value="marathi">Marathi</option>
+            <option value="bangla">Bangla</option>
+          </select>
           <div id="status" class="status disconnected">Disconnected</div>
         </div>
       </header>
@@ -27,20 +34,22 @@
               text-align: left;
             "
           >
-            <h3>Features Enabled:</h3>
+            <h3>Support Flow:</h3>
             <ul style="margin: 10px 0 20px 20px">
               <li>
-                <strong>Native Audio:</strong> Low latency voice interaction
+                <strong>Employee ID:</strong> Caller validation at the start
               </li>
               <li>
-                <strong>Multilingual:</strong> Speak in different languages
+                <strong>Issue Routing:</strong> Password, Citrix, or VPN login path
               </li>
-
+              <li>
+                <strong>Guided Steps:</strong> One step at a time with clear escalation
+              </li>
             </ul>
             <p>
               <em
-                >Note: When you connect, the app sends a text message to Gemini
-                instructing it to introduce itself and these features.</em
+                >Note: On connect, the assistant starts the support script and
+                asks for employee ID first.</em
               >
             </p>
           </div>
@@ -77,7 +86,12 @@
             </div>
 
             <div class="right-panel">
+              <div class="language-badge-row">
+                <span class="language-badge-label">Active Reply Language:</span>
+                <span class="language-badge" id="activeLanguageBadge">English</span>
+              </div>
               <div class="chat-log" id="chat-log"></div>
+              <div class="tool-log" id="tool-log"></div>
               <div class="input-area">
                 <input
                   type="text"
