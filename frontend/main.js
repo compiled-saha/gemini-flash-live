@@ -32,9 +32,9 @@ const mediaHandler = new MediaHandler();
 
 function getSelectedLanguageName() {
   const value = (languageSelect?.value || "english").toLowerCase();
-  if (value === "telugu") return "Telugu";
-  if (value === "marathi") return "Marathi";
-  if (value === "bangla") return "Bangla";
+  if (value === "hindi") return "Hindi";
+  if (value === "german") return "German";
+  if (value === "spanish") return "Spanish";
   return "English";
 }
 
