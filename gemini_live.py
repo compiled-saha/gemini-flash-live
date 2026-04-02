@@ -33,6 +33,18 @@ VPN_PATH_STEPS = [
     "Try another network, such as mobile hotspot.",
 ]
 
+OUTLOOK_PATH_STEPS = [
+    "Check internet connection.",
+    "Verify recipient email address is correct.",
+    "Check your Junk or Spam folder for missing emails.",
+    "Clear the Outbox by deleting any stuck or large emails.",
+    "Restart Outlook by closing and reopening the application.",
+    "Update Outlook to the latest version.",
+    "Check mail server settings such as SMTP or Exchange configuration.",
+    "Re-authenticate your account if your password was recently changed.",
+    "Recreate your Outlook profile if the mailbox is corrupted.",
+]
+
 HELPDESK_ESCALATION = "Please contact IT Helpdesk for manual assistance."
 MAX_EMPLOYEE_ID_ATTEMPTS = 3
 
@@ -61,13 +73,22 @@ def get_vpn_support_path():
     }
 
 
+def get_outlook_support_path():
+    return {
+        "issue_type": "outlook",
+        "steps": OUTLOOK_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
 def get_all_support_paths_summary():
     return {
-        "issue_types": ["password", "citrix", "vpn"],
+        "issue_types": ["password", "citrix", "vpn", "outlook"],
         "summary": {
             "password": "Reset password using Forgot Password and retry login.",
             "citrix": "Check internet and credentials, then update and restart Citrix Workspace.",
             "vpn": "Check internet and credentials, then update VPN client and retry on another network.",
+            "outlook": "Check internet, verify recipient, clear Outbox, restart Outlook, and check mail server settings.",
         },
         "escalation": HELPDESK_ESCALATION,
     }
@@ -101,6 +122,7 @@ Conversation flow:
     - Password issue
     - Citrix issue
     - VPN login issue
+    - Outlook issue
 
 Extra rules:
 - Supported reply languages are: English, Telugu, Marathi, Bangla.
@@ -110,11 +132,12 @@ Extra rules:
 - Do not provide troubleshooting steps until employee ID is validated.
 - Allow at most 3 invalid employee ID attempts.
 - On the 3rd invalid attempt, stop verification and instruct caller to contact IT Helpdesk.
-- If the issue type is unclear, ask them to choose Password, Citrix, or VPN.
+- If the issue type is unclear, ask them to choose Password, Citrix, VPN, or Outlook.
 - If user asks for all options, call tool get_all_support_paths_summary and summarize briefly.
 - When user selects Password issue, call tool get_password_support_path.
 - When user selects Citrix issue, call tool get_citrix_support_path.
 - When user selects VPN login issue, call tool get_vpn_support_path.
+- When user selects Outlook issue, call tool get_outlook_support_path.
 - After tool result, guide the user through steps one by one and use tool escalation message when needed.
 - Be polite and supportive, but do not add unrelated troubleshooting steps.
 """.strip()
@@ -182,6 +205,14 @@ class GeminiLive:
                         },
                     },
                     {
+                        "name": "get_outlook_support_path",
+                        "description": "Returns the approved troubleshooting steps for Microsoft Outlook email issues such as emails not sending, not receiving, Outbox stuck, profile errors, or mail server configuration problems.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
                         "name": "get_all_support_paths_summary",
                         "description": "Returns a short summary for all support paths: password, Citrix, and VPN.",
                         "parameters": {
@@ -197,6 +228,7 @@ class GeminiLive:
             "get_password_support_path": self._get_password_support_path,
             "get_citrix_support_path": self._get_citrix_support_path,
             "get_vpn_support_path": self._get_vpn_support_path,
+            "get_outlook_support_path": self._get_outlook_support_path,
             "get_all_support_paths_summary": self._get_all_support_paths_summary,
         }
 
@@ -249,6 +281,13 @@ class GeminiLive:
         if not self.validated_employee_id:
             return self._validation_required_response()
         result = get_vpn_support_path()
+        result["employee_id"] = self.validated_employee_id
+        return result
+
+    def _get_outlook_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_outlook_support_path()
         result["employee_id"] = self.validated_employee_id
         return result
 
