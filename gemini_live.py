@@ -3,8 +3,9 @@ import inspect
 import logging
 import re
 import traceback
+import unicodedata
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 from google import genai
@@ -502,6 +503,123 @@ class GeminiLive:
         payload["employee_id"] = self.validated_employee_id
         return payload
 
+    def _normalize_step_outcome(self, outcome: str) -> Optional[str]:
+        raw = str(outcome or "").strip().lower()
+        if raw in {"resolved", "not_resolved"}:
+            return raw
+
+        # NLP-style normalization: remove accents and keep a clean token stream.
+        normalized_text = unicodedata.normalize("NFKD", raw)
+        normalized_text = normalized_text.encode("ascii", "ignore").decode("ascii")
+        normalized_text = re.sub(r"[_-]", " ", normalized_text)
+        normalized_text = re.sub(r"[^a-z0-9\s']+", " ", normalized_text)
+        normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+        if not normalized_text:
+            return None
+
+        tokens = normalized_text.split()
+
+        positive_tokens = {
+            "yes": 2.2,
+            "resolved": 2.5,
+            "fixed": 2.3,
+            "solved": 2.4,
+            "worked": 2.0,
+            "done": 1.4,
+            "ok": 1.2,
+            "okay": 1.2,
+            "si": 2.0,
+            "claro": 1.5,
+            "vale": 1.4,
+            "funciono": 2.2,
+            "ja": 2.0,
+            "genau": 1.8,
+            "ha": 1.4,
+            "theek": 1.6,
+            "thik": 1.6,
+        }
+        negative_tokens = {
+            "no": 2.4,
+            "not": 1.5,
+            "still": 1.6,
+            "broken": 2.0,
+            "nope": 2.1,
+            "nah": 1.8,
+            "didnt": 1.8,
+            "didn't": 1.8,
+            "nein": 2.2,
+            "nicht": 1.8,
+            "nahi": 2.0,
+        }
+
+        positive_phrases = {
+            "it worked": 3.0,
+            "that worked": 3.0,
+            "ho gaya": 2.8,
+            "resolved now": 2.6,
+        }
+        negative_phrases = {
+            "not resolved": 3.2,
+            "did not work": 3.1,
+            "didnt work": 3.1,
+            "still not": 2.8,
+            "still broken": 3.0,
+            "not working": 3.0,
+            "does not work": 3.0,
+            "doesnt work": 3.0,
+            "no funciona": 3.0,
+            "todavia no": 2.8,
+            "abhi nahi": 2.8,
+            "nahi hua": 3.0,
+            "nahi chala": 3.0,
+        }
+
+        contrast_words = {"but", "however", "though", "lekin", "pero", "aber"}
+        negation_words = {"not", "no", "never", "nahi", "nahin", "kein", "keine", "ni"}
+
+        # Later clause after a contrast marker should get higher influence.
+        last_contrast_idx = -1
+        for idx, token in enumerate(tokens):
+            if token in contrast_words:
+                last_contrast_idx = idx
+
+        def clause_weight(index: int) -> float:
+            return 1.35 if (last_contrast_idx >= 0 and index > last_contrast_idx) else 1.0
+
+        score = 0.0
+
+        for phrase, weight in positive_phrases.items():
+            for match in re.finditer(rf"\b{re.escape(phrase)}\b", normalized_text):
+                score += weight * clause_weight(len(normalized_text[:match.start()].split()))
+
+        for phrase, weight in negative_phrases.items():
+            for match in re.finditer(rf"\b{re.escape(phrase)}\b", normalized_text):
+                score -= weight * clause_weight(len(normalized_text[:match.start()].split()))
+
+        for i, token in enumerate(tokens):
+            local_weight = clause_weight(i)
+            window_start = max(0, i - 3)
+            negated = any(tokens[j] in negation_words for j in range(window_start, i))
+
+            if token in positive_tokens:
+                contribution = positive_tokens[token] * local_weight
+                score += (-contribution * 1.1) if negated else contribution
+
+            if token in negative_tokens:
+                contribution = negative_tokens[token] * local_weight
+                score += (contribution * 0.9) if negated else (-contribution)
+
+        if re.search(r"\bno\b.*\b(resolved|fixed|worked|solved)\b", normalized_text):
+            score -= 2.2
+        if re.search(r"\byes\b.*\b(still|not|broken|no)\b", normalized_text):
+            score -= 2.0
+
+        if score >= 1.6:
+            return "resolved"
+        if score <= -1.6:
+            return "not_resolved"
+        return None
+
     def _confirm_step_outcome(self, outcome: str):
         if not self.validated_employee_id:
             return self._validation_required_response()
@@ -511,11 +629,7 @@ class GeminiLive:
                 "message": "No active issue navigation. Call start_step_navigation first.",
             }
 
-        raw = str(outcome or "").strip().lower()
-        resolved_words = {"yes", "resolved", "fixed", "done", "worked", "ok", "okay", "it worked", "that worked"}
-        not_resolved_words = {"no", "not_resolved", "still", "nope", "did not", "didn't", "not working", "didn't work"}
-        norm = "resolved" if any(w in raw for w in resolved_words) else (
-               "not_resolved" if any(w in raw for w in not_resolved_words) else raw)
+        norm = self._normalize_step_outcome(outcome)
 
         if norm not in ("resolved", "not_resolved"):
             return {

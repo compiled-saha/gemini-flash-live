@@ -27,6 +27,7 @@ const visualInputBadge = document.getElementById("visual-input-badge");
 const audioOutputBadge = document.getElementById("audio-output-badge");
 const mediaFlowCaption = document.getElementById("media-flow-caption");
 const browserHint = document.getElementById("browser-hint");
+const chatPriorityBtn = document.getElementById("chatPriorityBtn");
 
 let currentGeminiMessageDiv = null;
 let currentUserMessageDiv = null;
@@ -37,6 +38,7 @@ let visualCaptionMessageDiv = null;
 let latestUserInputText = "";
 let visualCaptureCardDiv = null;
 let visualCaptureLastUpdateAt = 0;
+let isChatPriorityMode = false;
 
 const mediaState = {
   audioInput: false,
@@ -95,6 +97,17 @@ function applyBrowserCompatibilityUI() {
       browserHint.textContent =
         "Browser check complete: mic, camera, and screen sharing are supported in this browser.";
     }
+  }
+}
+
+function applyChatPriorityMode(enabled) {
+  isChatPriorityMode = Boolean(enabled);
+  appSection.classList.toggle("chat-priority", isChatPriorityMode);
+  if (chatPriorityBtn) {
+    chatPriorityBtn.textContent = isChatPriorityMode
+      ? "Chat Priority: On"
+      : "Chat Priority: Off";
+    chatPriorityBtn.setAttribute("aria-pressed", String(isChatPriorityMode));
   }
 }
 
@@ -712,6 +725,7 @@ function resetUI() {
   if (stepProgressRow) {
     stepProgressRow.style.display = "none";
   }
+  applyChatPriorityMode(false);
   connectBtn.disabled = false;
 }
 
@@ -726,6 +740,12 @@ function showSessionEnd() {
 restartBtn.onclick = () => {
   resetUI();
 };
+
+if (chatPriorityBtn) {
+  chatPriorityBtn.addEventListener("click", () => {
+    applyChatPriorityMode(!isChatPriorityMode);
+  });
+}
 
 updateLanguageBadge();
 
