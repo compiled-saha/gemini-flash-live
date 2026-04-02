@@ -22,13 +22,275 @@ const stepProgressRow = document.getElementById("step-progress-row");
 const stepProgressLabel = document.getElementById("step-progress-label");
 const stepProgressFill = document.getElementById("step-progress-fill");
 const stepIssueBadge = document.getElementById("step-issue-badge");
+const audioInputBadge = document.getElementById("audio-input-badge");
+const visualInputBadge = document.getElementById("visual-input-badge");
+const audioOutputBadge = document.getElementById("audio-output-badge");
+const mediaFlowCaption = document.getElementById("media-flow-caption");
+const browserHint = document.getElementById("browser-hint");
 
 let currentGeminiMessageDiv = null;
 let currentUserMessageDiv = null;
 let geminiStreamState = { accumulated: "", lastChunk: "" };
 let userStreamState = { accumulated: "", lastChunk: "" };
+let audioOutputTimer = null;
+let visualCaptionMessageDiv = null;
+let latestUserInputText = "";
+let visualCaptureCardDiv = null;
+let visualCaptureLastUpdateAt = 0;
+
+const mediaState = {
+  audioInput: false,
+  visualInput: "off",
+  audioOutput: false,
+  lastVisualFrameAt: null,
+  lastAudioPlaybackAt: null,
+};
 
 const mediaHandler = new MediaHandler();
+
+function detectBrowserCapabilities() {
+  const hasMediaDevices = Boolean(navigator.mediaDevices);
+  const hasGetUserMedia = Boolean(
+    navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+  );
+  const hasDisplayMedia = Boolean(
+    navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia
+  );
+  const hasAudioContext = Boolean(window.AudioContext || window.webkitAudioContext);
+  const hasAudioWorklet = Boolean(window.AudioWorkletNode);
+
+  return {
+    hasMediaDevices,
+    hasGetUserMedia,
+    hasDisplayMedia,
+    hasAudioContext,
+    hasAudioWorklet,
+  };
+}
+
+function applyBrowserCompatibilityUI() {
+  const caps = detectBrowserCapabilities();
+  const warnings = [];
+
+  micBtn.disabled = !(caps.hasGetUserMedia && caps.hasAudioContext && caps.hasAudioWorklet);
+  cameraBtn.disabled = !caps.hasGetUserMedia;
+  screenBtn.disabled = !caps.hasDisplayMedia;
+
+  if (!caps.hasMediaDevices) {
+    warnings.push("This browser does not support media devices for mic/camera.");
+  }
+  if (!caps.hasDisplayMedia) {
+    warnings.push("Screen sharing is not available in this browser.");
+  }
+  if (!caps.hasAudioWorklet) {
+    warnings.push("Live microphone streaming requires a modern Chrome/Edge browser.");
+  }
+
+  if (browserHint) {
+    if (warnings.length) {
+      browserHint.classList.add("warning");
+      browserHint.textContent = `Compatibility warning: ${warnings.join(" ")}`;
+    } else {
+      browserHint.classList.remove("warning");
+      browserHint.textContent =
+        "Browser check complete: mic, camera, and screen sharing are supported in this browser.";
+    }
+  }
+}
+
+function formatClockTime(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function setBadgeState(element, text, stateClass) {
+  if (!element) return;
+  element.textContent = text;
+  element.className = `media-caption-badge ${stateClass}`;
+}
+
+function buildMediaFlowText() {
+  const parts = [];
+
+  if (mediaState.audioInput) {
+    parts.push("mic audio is streaming in");
+  }
+
+  if (mediaState.visualInput === "camera") {
+    parts.push("camera image frames are being sent");
+  } else if (mediaState.visualInput === "screen") {
+    parts.push("screen image frames are being sent");
+  }
+
+  if (mediaState.audioOutput) {
+    parts.push("assistant audio is playing back");
+  }
+
+  if (parts.length === 0) {
+    return "Flow: connect and start mic, camera, or screen share to see live media activity.";
+  }
+
+  const meta = [];
+  if (mediaState.lastVisualFrameAt && mediaState.visualInput !== "off") {
+    meta.push(`last image ${formatClockTime(mediaState.lastVisualFrameAt)}`);
+  }
+  if (mediaState.lastAudioPlaybackAt) {
+    meta.push(`last audio ${formatClockTime(mediaState.lastAudioPlaybackAt)}`);
+  }
+
+  const suffix = meta.length ? ` (${meta.join(" | ")})` : "";
+  return `Flow: ${parts.join(", ")}.${suffix}`;
+}
+
+function updateMediaCaptionPanel() {
+  setBadgeState(
+    audioInputBadge,
+    mediaState.audioInput ? "Live" : "Off",
+    mediaState.audioInput ? "active" : "idle"
+  );
+
+  if (mediaState.visualInput === "camera") {
+    setBadgeState(visualInputBadge, "Camera", "live");
+  } else if (mediaState.visualInput === "screen") {
+    setBadgeState(visualInputBadge, "Screen", "live");
+  } else {
+    setBadgeState(visualInputBadge, "Off", "idle");
+  }
+
+  setBadgeState(
+    audioOutputBadge,
+    mediaState.audioOutput ? "Playing" : "Idle",
+    mediaState.audioOutput ? "active" : "idle"
+  );
+
+  if (mediaFlowCaption) {
+    mediaFlowCaption.textContent = buildMediaFlowText();
+  }
+}
+
+function updateVisualCaptionInChat() {
+  visualCaptionMessageDiv = null;
+}
+
+function getOrCreateVisualCaptureCard() {
+  if (visualCaptureCardDiv && chatLog.contains(visualCaptureCardDiv)) {
+    return visualCaptureCardDiv;
+  }
+
+  const card = document.createElement("div");
+  card.className = "message system visual-capture-card";
+
+  const title = document.createElement("div");
+  title.className = "visual-capture-title";
+  title.textContent = "Visual Capture";
+
+  const image = document.createElement("img");
+  image.className = "visual-capture-image";
+  image.alt = "Latest captured frame";
+
+  const source = document.createElement("div");
+  source.className = "visual-capture-source";
+
+  const input = document.createElement("div");
+  input.className = "visual-capture-input";
+
+  card.appendChild(title);
+  card.appendChild(image);
+  card.appendChild(source);
+  card.appendChild(input);
+
+  chatLog.appendChild(card);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  visualCaptureCardDiv = card;
+  return card;
+}
+
+function updateVisualCaptureInputText() {
+  if (!visualCaptureCardDiv || !chatLog.contains(visualCaptureCardDiv)) return;
+  const input = visualCaptureCardDiv.querySelector(".visual-capture-input");
+  if (!input) return;
+  input.textContent = latestUserInputText
+    ? `Linked user input: ${latestUserInputText}`
+    : "Linked user input: (waiting for speech/text)";
+}
+
+function updateVisualCaptureCard(base64Data, sourceType) {
+  if (!chatLog) return;
+  const now = Date.now();
+  if (now - visualCaptureLastUpdateAt < 1200) return;
+  visualCaptureLastUpdateAt = now;
+
+  const card = getOrCreateVisualCaptureCard();
+  const image = card.querySelector(".visual-capture-image");
+  const source = card.querySelector(".visual-capture-source");
+
+  if (image) {
+    image.src = `data:image/jpeg;base64,${base64Data}`;
+  }
+
+  if (source) {
+    const sourceName = sourceType === "screen" ? "Screen Share" : "Camera";
+    source.textContent = `${sourceName} | ${new Date().toLocaleTimeString()}`;
+  }
+
+  updateVisualCaptureInputText();
+}
+
+function appendSystemCaption(text) {
+  if (!text) return;
+  appendMessage("system", text);
+}
+
+function setVisualMode(mode) {
+  mediaState.visualInput = mode;
+  if (mode === "off") {
+    mediaState.lastVisualFrameAt = null;
+    visualCaptureCardDiv = null;
+  }
+  updateMediaCaptionPanel();
+}
+
+function markVisualFrame(mode) {
+  mediaState.visualInput = mode;
+  mediaState.lastVisualFrameAt = Date.now();
+  updateMediaCaptionPanel();
+}
+
+function markAssistantAudioPlayback() {
+  mediaState.audioOutput = true;
+  mediaState.lastAudioPlaybackAt = Date.now();
+  updateMediaCaptionPanel();
+
+  if (audioOutputTimer) {
+    clearTimeout(audioOutputTimer);
+  }
+
+  audioOutputTimer = setTimeout(() => {
+    mediaState.audioOutput = false;
+    updateMediaCaptionPanel();
+  }, 2200);
+}
+
+function resetMediaState() {
+  mediaState.audioInput = false;
+  mediaState.visualInput = "off";
+  mediaState.audioOutput = false;
+  mediaState.lastVisualFrameAt = null;
+  mediaState.lastAudioPlaybackAt = null;
+  latestUserInputText = "";
+  visualCaptionMessageDiv = null;
+  visualCaptureCardDiv = null;
+  visualCaptureLastUpdateAt = 0;
+  if (audioOutputTimer) {
+    clearTimeout(audioOutputTimer);
+    audioOutputTimer = null;
+  }
+  updateMediaCaptionPanel();
+}
 
 function getSelectedLanguageName() {
   const value = (languageSelect?.value || "english").toLowerCase();
@@ -73,6 +335,7 @@ const geminiClient = new GeminiClient({
         console.error("Parse error:", e);
       }
     } else {
+      markAssistantAudioPlayback();
       mediaHandler.playAudio(event.data);
     }
   },
@@ -117,6 +380,11 @@ function handleJsonMessage(msg) {
     );
   } else if (msg.type === "tool_call") {
     appendToolEvent(msg);
+  } else if (msg.type === "error") {
+    const message = msg.message || "The live session ended unexpectedly.";
+    appendMessage("gemini", message);
+    statusDiv.textContent = msg.code === "resource_exhausted" ? "Quota Reached" : "Session Error";
+    statusDiv.className = "status error";
   }
 }
 
@@ -126,6 +394,10 @@ function appendStreamingText(role, chunkText, messageDiv, streamState) {
   if (!messageDiv) {
     streamState.accumulated = chunkText;
     streamState.lastChunk = chunkText;
+    if (role === "user") {
+      latestUserInputText = chunkText;
+      updateVisualCaptureInputText();
+    }
     return appendMessage(role, chunkText);
   }
 
@@ -138,6 +410,10 @@ function appendStreamingText(role, chunkText, messageDiv, streamState) {
     }
     streamState.accumulated = chunkText;
     streamState.lastChunk = chunkText;
+    if (role === "user") {
+      latestUserInputText = chunkText;
+      updateVisualCaptureInputText();
+    }
     return messageDiv;
   }
 
@@ -151,6 +427,10 @@ function appendStreamingText(role, chunkText, messageDiv, streamState) {
   chatLog.scrollTop = chatLog.scrollHeight;
   streamState.accumulated += chunkText;
   streamState.lastChunk = chunkText;
+  if (role === "user") {
+    latestUserInputText = streamState.accumulated;
+    updateVisualCaptureInputText();
+  }
   return messageDiv;
 }
 
@@ -295,6 +575,9 @@ disconnectBtn.onclick = () => {
 micBtn.onclick = async () => {
   if (mediaHandler.isRecording) {
     mediaHandler.stopAudio();
+    mediaState.audioInput = false;
+    updateMediaCaptionPanel();
+    appendSystemCaption("Mic stopped. Audio input is no longer being sent.");
     micBtn.textContent = "Start Mic";
   } else {
     try {
@@ -303,6 +586,9 @@ micBtn.onclick = async () => {
           geminiClient.send(data);
         }
       });
+      mediaState.audioInput = true;
+      updateMediaCaptionPanel();
+      appendSystemCaption("Mic started. Your audio is now streaming to the assistant.");
       micBtn.textContent = "Stop Mic";
     } catch (e) {
       alert("Could not start audio capture");
@@ -313,6 +599,8 @@ micBtn.onclick = async () => {
 cameraBtn.onclick = async () => {
   if (cameraBtn.textContent === "Stop Camera") {
     mediaHandler.stopVideo(videoPreview);
+    setVisualMode("off");
+    appendSystemCaption("Camera stopped. No image frames are being sent.");
     cameraBtn.textContent = "Start Camera";
     screenBtn.textContent = "Share Screen";
     videoPlaceholder.classList.remove("hidden");
@@ -320,15 +608,20 @@ cameraBtn.onclick = async () => {
     // If another stream is active (e.g. Screen), stop it first
     if (mediaHandler.videoStream) {
       mediaHandler.stopVideo(videoPreview);
+      setVisualMode("off");
       screenBtn.textContent = "Share Screen";
     }
 
     try {
       await mediaHandler.startVideo(videoPreview, (base64Data) => {
         if (geminiClient.isConnected()) {
+          markVisualFrame("camera");
+          updateVisualCaptureCard(base64Data, "camera");
           geminiClient.sendImage(base64Data);
         }
       });
+      setVisualMode("camera");
+      appendSystemCaption("Camera started. Image frames from the camera are now being sent.");
       cameraBtn.textContent = "Stop Camera";
       screenBtn.textContent = "Share Screen";
       videoPlaceholder.classList.add("hidden");
@@ -341,6 +634,8 @@ cameraBtn.onclick = async () => {
 screenBtn.onclick = async () => {
   if (screenBtn.textContent === "Stop Sharing") {
     mediaHandler.stopVideo(videoPreview);
+    setVisualMode("off");
+    appendSystemCaption("Screen sharing stopped. No screen image frames are being sent.");
     screenBtn.textContent = "Share Screen";
     cameraBtn.textContent = "Start Camera";
     videoPlaceholder.classList.remove("hidden");
@@ -348,6 +643,7 @@ screenBtn.onclick = async () => {
     // If another stream is active (e.g. Camera), stop it first
     if (mediaHandler.videoStream) {
       mediaHandler.stopVideo(videoPreview);
+      setVisualMode("off");
       cameraBtn.textContent = "Start Camera";
     }
 
@@ -356,15 +652,21 @@ screenBtn.onclick = async () => {
         videoPreview,
         (base64Data) => {
           if (geminiClient.isConnected()) {
+            markVisualFrame("screen");
+            updateVisualCaptureCard(base64Data, "screen");
             geminiClient.sendImage(base64Data);
           }
         },
         () => {
           // onEnded callback (e.g. user stopped sharing from browser)
+          setVisualMode("off");
+          appendSystemCaption("Screen sharing ended from the browser. Visual input is now off.");
           screenBtn.textContent = "Share Screen";
           videoPlaceholder.classList.remove("hidden");
         }
       );
+      setVisualMode("screen");
+      appendSystemCaption("Screen sharing started. Screen image frames are now being sent.");
       screenBtn.textContent = "Stop Sharing";
       cameraBtn.textContent = "Start Camera";
       videoPlaceholder.classList.add("hidden");
@@ -375,7 +677,7 @@ screenBtn.onclick = async () => {
 };
 
 sendBtn.onclick = sendText;
-textInput.onkeypress = (e) => {
+textInput.onkeydown = (e) => {
   if (e.key === "Enter") sendText();
 };
 
@@ -383,6 +685,8 @@ function sendText() {
   const text = textInput.value;
   if (text && geminiClient.isConnected()) {
     geminiClient.sendText(text);
+    latestUserInputText = text;
+    updateVisualCaptureInputText();
     appendMessage("user", text);
     textInput.value = "";
   }
@@ -395,6 +699,7 @@ function resetUI() {
 
   mediaHandler.stopAudio();
   mediaHandler.stopVideo(videoPreview);
+  resetMediaState();
   videoPlaceholder.classList.remove("hidden");
 
   micBtn.textContent = "Start Mic";
@@ -415,6 +720,7 @@ function showSessionEnd() {
   sessionEndSection.classList.remove("hidden");
   mediaHandler.stopAudio();
   mediaHandler.stopVideo(videoPreview);
+  resetMediaState();
 }
 
 restartBtn.onclick = () => {
@@ -442,3 +748,6 @@ document.querySelectorAll(".chip[data-cmd]").forEach((chip) => {
     appendMessage("user", text);
   });
 });
+
+updateMediaCaptionPanel();
+applyBrowserCompatibilityUI();

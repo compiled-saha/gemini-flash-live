@@ -52,8 +52,17 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection accepted")
 
     audio_input_queue = asyncio.Queue()
-    video_input_queue = asyncio.Queue()
+    video_input_queue = asyncio.Queue(maxsize=1)
     text_input_queue = asyncio.Queue()
+
+    async def enqueue_latest_video_frame(image_data: bytes):
+        """Keep only the newest frame so stale screenshots do not accumulate."""
+        if video_input_queue.full():
+            try:
+                video_input_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        await video_input_queue.put(image_data)
 
     async def audio_output_callback(data):
         await websocket.send_bytes(data)
@@ -80,7 +89,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if isinstance(payload, dict) and payload.get("type") == "image":
                             logger.info(f"Received image chunk from client: {len(payload['data'])} base64 chars")
                             image_data = base64.b64decode(payload["data"])
-                            await video_input_queue.put(image_data)
+                            await enqueue_latest_video_frame(image_data)
                             continue
                         if isinstance(payload, dict) and "text" in payload:
                             await text_input_queue.put(str(payload["text"]))

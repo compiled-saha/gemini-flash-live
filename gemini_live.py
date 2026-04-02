@@ -57,15 +57,37 @@ OUTLOOK_PATH_STEPS = [
     "If the issue continues, contact IT Helpdesk — they can check mailbox quota, Exchange server status, or recreate your mail profile.",
 ]
 
+PRINTER_PATH_STEPS = [
+    "Confirm the printer is powered on, shows Ready, and has no paper jam or offline error on its display.",
+    "On the shared screen, open Windows Settings > Bluetooth & devices > Printers & scanners.",
+    "If the printer is not listed, click Add device and select the correct printer from discovered devices.",
+    "If the printer is listed but not working, select it and click Set as default.",
+    "Open the printer queue and clear stuck jobs, then send a test print from Printer properties.",
+    "If test print fails, remove the printer and add it again, then retry test print.",
+    "If still failing, collect printer name/model, network type (USB/Wi-Fi), and exact error shown, then escalate.",
+]
+
+GENERAL_IT_PATH_STEPS = [
+    "Ask the caller to describe the exact symptom, error text, and when it started.",
+    "Ask what changed recently (password update, new software, network/location change, or device restart).",
+    "Guide a basic reset: close the affected app fully, reopen it, and retry the same action.",
+    "Check connectivity prerequisites for the issue (internet, VPN if required, account sign-in status).",
+    "If an error appears, ask the caller to read the exact error message and code, then confirm it back.",
+    "Try one targeted fix based on the visible symptom, then ask if it resolved the issue.",
+    "If unresolved, collect app name, device, exact error text, and attempted steps, then escalate.",
+]
+
 HELPDESK_ESCALATION = "Please contact IT Helpdesk for manual assistance."
 MAX_EMPLOYEE_ID_ATTEMPTS = 3
-SUPPORTED_ISSUES = ["password", "citrix", "vpn", "outlook"]
+SUPPORTED_ISSUES = ["password", "citrix", "vpn", "outlook", "printer", "general"]
 
 ISSUE_STEPS_MAP = {
     "password": PASSWORD_PATH_STEPS,
     "citrix": CITRIX_PATH_STEPS,
     "vpn": VPN_PATH_STEPS,
     "outlook": OUTLOOK_PATH_STEPS,
+    "printer": PRINTER_PATH_STEPS,
+    "general": GENERAL_IT_PATH_STEPS,
 }
 
 
@@ -101,14 +123,32 @@ def get_outlook_support_path():
     }
 
 
+def get_printer_support_path():
+    return {
+        "issue_type": "printer",
+        "steps": PRINTER_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
+def get_general_support_path():
+    return {
+        "issue_type": "general",
+        "steps": GENERAL_IT_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
 def get_all_support_paths_summary():
     return {
-        "issue_types": ["password", "citrix", "vpn", "outlook"],
+        "issue_types": ["password", "citrix", "vpn", "outlook", "printer", "general"],
         "summary": {
             "password": "Check if account is locked, use self-service password reset portal, clear browser credentials, or contact IT to unlock.",
             "citrix": "Verify internet, check StoreFront URL and AD credentials, update or reset Citrix Workspace, try browser access.",
             "vpn": "Verify internet and VPN server address, confirm AD credentials and MFA, check firewall settings, update VPN client.",
             "outlook": "Check network and Offline mode, re-authenticate if password expired, clear Outbox, repair data file, or contact IT for mailbox issues.",
+            "printer": "Guide printer setup and test print using Windows printer settings, queue cleanup, and re-add flow.",
+            "general": "Handle other IT issues with symptom-driven guided troubleshooting and escalation if unresolved.",
         },
         "escalation": HELPDESK_ESCALATION,
     }
@@ -148,6 +188,7 @@ def classify_support_intent(user_text: str):
         "citrix": ["citrix", "workspace", "ica"],
         "vpn": ["vpn", "network tunnel", "secure connect"],
         "outlook": ["outlook", "email", "mail", "inbox", "outbox", "smtp", "exchange"],
+        "printer": ["printer", "print", "printing", "print queue", "add printer", "configure printer", "set default printer", "driver"],
     }
 
     scores = {issue: 0 for issue in issue_keywords}
@@ -158,9 +199,9 @@ def classify_support_intent(user_text: str):
     best_score = scores[best_issue]
     if best_score == 0:
         return {
-            "intent": "unknown",
-            "confidence": 0.2,
-            "reason": "No strong keyword match.",
+            "intent": "general",
+            "confidence": 0.6,
+            "reason": "No strong keyword match. Falling back to general IT troubleshooting.",
             "supported_intents": SUPPORTED_ISSUES + ["handoff", "unknown"],
         }
 
@@ -186,12 +227,7 @@ Conversation flow:
 1) Start with: "Thank you for calling. Please say your employee ID."
 2) Validate the employee ID by calling tool validate_employee_id.
 3) If validation fails, ask for employee ID again and do not continue.
-4) After successful validation, confirm with: "Thank you for providing employee ID <ID>. How can I help you today?"
-3) Ask them to choose exactly one issue type:
-    - Password issue
-    - Citrix issue
-    - VPN login issue
-    - Outlook issue
+4) After successful validation, confirm with: "Thank you for providing employee ID <ID>. How can I help you today?" and wait for the user to describe their issue.
 
 Extra rules:
 - Supported reply languages are: English, Hindi, German, Spanish.
@@ -201,8 +237,9 @@ Extra rules:
 - Do not provide troubleshooting steps until employee ID is validated.
 - Allow at most 3 invalid employee ID attempts.
 - On the 3rd invalid attempt, stop verification and instruct caller to contact IT Helpdesk.
-- If the issue type is unclear, ask them to choose Password, Citrix, VPN, or Outlook.
+- If the issue type is unclear, ask a clarifying question and continue with general IT troubleshooting when needed.
 - For free-form issue descriptions, call classify_support_intent first.
+- If the user is sharing screen and asks about what is visible, use visual context to guide one UI action at a time.
 - After identifying an issue, call start_step_navigation to begin guided troubleshooting.
 - For user commands like next, repeat, back, skip, start over, call navigate_support_step.
 - Do not repeat the navigation command list in every response.
@@ -218,6 +255,8 @@ Extra rules:
 - When user selects Citrix issue, call tool get_citrix_support_path.
 - When user selects VPN login issue, call tool get_vpn_support_path.
 - When user selects Outlook issue, call tool get_outlook_support_path.
+- When user asks to configure printer or fix printing, call tool get_printer_support_path.
+- For any other IT issue, call tool get_general_support_path.
 - After tool result, guide the user through steps one by one and use tool escalation message when needed.
 - If user asks for escalation or issue remains unresolved, call get_smart_escalation_summary.
 - Be polite and supportive, but do not add unrelated troubleshooting steps.
@@ -241,7 +280,10 @@ class GeminiLive:
         self.api_key = api_key
         self.model = model
         self.input_sample_rate = input_sample_rate
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version="v1beta"),
+        )
         self.validated_employee_id = None
         self.employee_id_attempts = 0
         self.current_issue_type = None
@@ -269,7 +311,7 @@ class GeminiLive:
                     },
                     {
                         "name": "classify_support_intent",
-                        "description": "Classifies user issue intent into password, citrix, vpn, outlook, handoff, or unknown.",
+                        "description": "Classifies user issue intent into password, citrix, vpn, outlook, printer, general, handoff, or unknown.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -289,7 +331,7 @@ class GeminiLive:
                             "properties": {
                                 "issue_type": {
                                     "type": "string",
-                                    "description": "One of: password, citrix, vpn, outlook"
+                                    "description": "One of: password, citrix, vpn, outlook, printer, general"
                                 }
                             },
                             "required": ["issue_type"],
@@ -369,8 +411,24 @@ class GeminiLive:
                         },
                     },
                     {
+                        "name": "get_printer_support_path",
+                        "description": "Returns printer configuration and printing troubleshooting steps.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "get_general_support_path",
+                        "description": "Returns generic IT troubleshooting steps for issues outside password, citrix, vpn, or outlook.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
                         "name": "get_all_support_paths_summary",
-                        "description": "Returns a short summary for all support paths: password, Citrix, and VPN.",
+                        "description": "Returns a short summary for all support paths: password, citrix, vpn, outlook, printer, and general.",
                         "parameters": {
                             "type": "object",
                             "properties": {},
@@ -390,6 +448,8 @@ class GeminiLive:
             "get_citrix_support_path": self._get_citrix_support_path,
             "get_vpn_support_path": self._get_vpn_support_path,
             "get_outlook_support_path": self._get_outlook_support_path,
+            "get_printer_support_path": self._get_printer_support_path,
+            "get_general_support_path": self._get_general_support_path,
             "get_all_support_paths_summary": self._get_all_support_paths_summary,
         }
 
@@ -433,7 +493,7 @@ class GeminiLive:
         if normalized not in ISSUE_STEPS_MAP:
             return {
                 "error": "UNSUPPORTED_ISSUE_TYPE",
-                "message": "Supported issue types are password, citrix, vpn, and outlook.",
+                "message": "Supported issue types are password, citrix, vpn, outlook, printer, and general.",
                 "supported_issue_types": list(ISSUE_STEPS_MAP.keys()),
             }
 
@@ -629,6 +689,24 @@ class GeminiLive:
         result["step_state"] = self._get_step_state_payload("outlook", self.current_step_index)
         return result
 
+    def _get_printer_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_printer_support_path()
+        self._set_issue_state("printer")
+        result["employee_id"] = self.validated_employee_id
+        result["step_state"] = self._get_step_state_payload("printer", self.current_step_index)
+        return result
+
+    def _get_general_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_general_support_path()
+        self._set_issue_state("general")
+        result["employee_id"] = self.validated_employee_id
+        result["step_state"] = self._get_step_state_payload("general", self.current_step_index)
+        return result
+
     def _get_all_support_paths_summary(self):
         if not self.validated_employee_id:
             return self._validation_required_response()
@@ -639,12 +717,17 @@ class GeminiLive:
     async def start_session(self, audio_input_queue, video_input_queue, text_input_queue, audio_output_callback, audio_interrupt_callback=None):
         config = types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name="Puck"
                     )
                 )
+            ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=104857,
+                sliding_window=types.SlidingWindow(target_tokens=52428),
             ),
             system_instruction=types.Content(parts=[types.Part(text=IT_SUPPORT_SYSTEM_INSTRUCTION)]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -693,6 +776,7 @@ class GeminiLive:
                         lang_match = re.search(r"LANGUAGE_PREF:\s*([A-Za-z]+)", str(text or ""), flags=re.IGNORECASE)
                         if lang_match:
                             self.active_language = lang_match.group(1).capitalize()
+
                         logger.info(f"Sending text to Gemini: {text}")
                         await session.send_realtime_input(text=text)
                 except asyncio.CancelledError:
@@ -778,7 +862,25 @@ class GeminiLive:
                     logger.debug("receive_loop task cancelled")
                 except Exception as e:
                     logger.error(f"receive_loop error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-                    await event_queue.put({"type": "error", "error": f"{type(e).__name__}: {e}"})
+                    error_text = f"{type(e).__name__}: {e}"
+                    error_code = "session_error"
+                    user_message = "The live session ended unexpectedly. Please try again."
+
+                    if "resource has been exhausted" in str(e).lower():
+                        error_code = "resource_exhausted"
+                        user_message = (
+                            "Gemini Live hit a quota or resource limit. "
+                            "Try again in a bit, or retry without camera or screen sharing."
+                        )
+
+                    await event_queue.put(
+                        {
+                            "type": "error",
+                            "code": error_code,
+                            "error": error_text,
+                            "message": user_message,
+                        }
+                    )
                 finally:
                     logger.info("receive_loop exiting")
                     await event_queue.put(None)

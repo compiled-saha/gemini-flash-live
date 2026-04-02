@@ -3,6 +3,10 @@
  */
 class MediaHandler {
   constructor() {
+    this.videoFrameIntervalMs = 2000;
+    this.captureWidth = 512;
+    this.captureHeight = 288;
+    this.captureQuality = 0.55;
     this.audioContext = null;
     this.mediaStream = null;
     this.audioWorkletNode = null;
@@ -87,10 +91,11 @@ class MediaHandler {
         video: true,
       });
       videoElement.srcObject = this.videoStream;
+      await videoElement.play().catch(() => {});
 
       this.videoInterval = setInterval(() => {
         this.captureFrame(videoElement, onFrame);
-      }, 1000); // 1 FPS
+      }, this.videoFrameIntervalMs);
     } catch (e) {
       console.error("Error starting video:", e);
       throw e;
@@ -102,7 +107,15 @@ class MediaHandler {
       this.videoStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
       });
+
+      // The browser may suspend AudioContext while the screen-picker dialog is open.
+      // Resume it now so mic capture and audio playback keep working.
+      if (this.audioContext && this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
+
       videoElement.srcObject = this.videoStream;
+      await videoElement.play().catch(() => {});
 
       // Handle stream ending (e.g. user clicks "Stop sharing" in browser UI)
       this.videoStream.getVideoTracks()[0].onended = () => {
@@ -112,7 +125,7 @@ class MediaHandler {
 
       this.videoInterval = setInterval(() => {
         this.captureFrame(videoElement, onFrame);
-      }, 1000); // 1 FPS
+      }, this.videoFrameIntervalMs);
     } catch (e) {
       console.error("Error starting screen share:", e);
       throw e;
@@ -135,17 +148,26 @@ class MediaHandler {
 
   captureFrame(videoElement, onFrame) {
     if (!this.videoStream) return;
-    this.videoCanvas.width = 640;
-    this.videoCanvas.height = 480;
-    this.canvasCtx.drawImage(videoElement, 0, 0, 640, 480);
-    const base64 = this.videoCanvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+    this.videoCanvas.width = this.captureWidth;
+    this.videoCanvas.height = this.captureHeight;
+    this.canvasCtx.drawImage(
+      videoElement,
+      0,
+      0,
+      this.captureWidth,
+      this.captureHeight
+    );
+    const base64 = this.videoCanvas
+      .toDataURL("image/jpeg", this.captureQuality)
+      .split(",")[1];
     onFrame(base64);
   }
 
   playAudio(arrayBuffer) {
     if (!this.audioContext) return;
     if (this.audioContext.state === "suspended") {
-      this.audioContext.resume();
+      this.audioContext.resume(); // fire-and-forget; next chunk will play once resumed
+      return;
     }
 
     const pcmData = new Int16Array(arrayBuffer);
