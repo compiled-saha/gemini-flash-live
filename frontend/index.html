@@ -90,6 +90,13 @@
                 <span class="language-badge-label">Active Reply Language:</span>
                 <span class="language-badge" id="activeLanguageBadge">English</span>
               </div>
+              <div class="step-progress-bar-row" id="step-progress-row" style="display:none;">
+                <span class="step-progress-label" id="step-progress-label">Step 1 of 5</span>
+                <div class="step-progress-track">
+                  <div class="step-progress-fill" id="step-progress-fill" style="width:20%"></div>
+                </div>
+                <span class="step-issue-badge" id="step-issue-badge">issue</span>
+              </div>
               <div class="chat-log" id="chat-log"></div>
               <div class="tool-log" id="tool-log"></div>
               <div class="input-area">
@@ -99,6 +106,16 @@
                   placeholder="Type a message..."
                 />
                 <button id="sendBtn" class="btn">Send</button>
+              </div>
+              <p class="nav-note">
+                You can also say "next", "repeat", "back", "start over", or "status".
+              </p>
+              <div class="chip-row">
+                <button class="chip" data-cmd="next">Next &#9654;</button>
+                <button class="chip" data-cmd="repeat">&#9654;&#9654; Repeat</button>
+                <button class="chip" data-cmd="back">&#9664; Back</button>
+                <button class="chip" data-cmd="status">Status</button>
+                <button class="chip chip-danger" data-cmd="escalate">Escalate &#9888;</button>
               </div>
             </div>
           </div>

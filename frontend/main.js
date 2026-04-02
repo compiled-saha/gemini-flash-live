@@ -18,6 +18,10 @@ const chatLog = document.getElementById("chat-log");
 const toolLog = document.getElementById("tool-log");
 const languageSelect = document.getElementById("languageSelect");
 const activeLanguageBadge = document.getElementById("activeLanguageBadge");
+const stepProgressRow = document.getElementById("step-progress-row");
+const stepProgressLabel = document.getElementById("step-progress-label");
+const stepProgressFill = document.getElementById("step-progress-fill");
+const stepIssueBadge = document.getElementById("step-issue-badge");
 
 let currentGeminiMessageDiv = null;
 let currentUserMessageDiv = null;
@@ -169,6 +173,9 @@ function appendToolEvent(msg) {
     eventDiv.classList.add("tool-event-warning");
   }
 
+  // Update step progress bar whenever a step navigation result arrives
+  updateStepProgress(result);
+
   const title = document.createElement("div");
   title.className = "tool-event-title";
   let titleText = `Tool: ${msg.name}`;
@@ -181,16 +188,85 @@ function appendToolEvent(msg) {
   if (isBlocked) {
     titleText += " | Escalated";
   }
+  titleText += ` | ${new Date().toLocaleTimeString()}`;
   title.textContent = titleText;
 
-  const body = document.createElement("pre");
+  const body = document.createElement("div");
   body.className = "tool-event-body";
-  body.textContent = JSON.stringify(result, null, 2);
+  body.appendChild(renderStructuredData(result));
 
   eventDiv.appendChild(title);
   eventDiv.appendChild(body);
   toolLog.appendChild(eventDiv);
   toolLog.scrollTop = toolLog.scrollHeight;
+}
+
+function renderStructuredData(value) {
+  if (value === null || value === undefined) {
+    const span = document.createElement("span");
+    span.className = "tool-value";
+    span.textContent = String(value);
+    return span;
+  }
+
+  if (Array.isArray(value)) {
+    const list = document.createElement("ul");
+    list.className = "tool-list";
+    value.forEach((item) => {
+      const li = document.createElement("li");
+      li.appendChild(renderStructuredData(item));
+      list.appendChild(li);
+    });
+    return list;
+  }
+
+  if (typeof value === "object") {
+    const wrapper = document.createElement("div");
+    wrapper.className = "tool-kv-grid";
+    Object.entries(value).forEach(([key, val]) => {
+      const row = document.createElement("div");
+      row.className = "tool-kv-row";
+
+      const keyEl = document.createElement("span");
+      keyEl.className = "tool-key";
+      keyEl.textContent = key;
+
+      const valEl = document.createElement("div");
+      valEl.className = "tool-value";
+      valEl.appendChild(renderStructuredData(val));
+
+      row.appendChild(keyEl);
+      row.appendChild(valEl);
+      wrapper.appendChild(row);
+    });
+    return wrapper;
+  }
+
+  const span = document.createElement("span");
+  span.className = "tool-value";
+  span.textContent = String(value);
+  return span;
+}
+
+// Step progress bar updater
+function updateStepProgress(result) {
+  if (!stepProgressRow) return;
+  // Accept step data directly or nested inside step_state
+  const step = result.step_number || (result.step_state && result.step_state.step_number);
+  const total = result.total_steps || (result.step_state && result.step_state.total_steps);
+  const issue = result.issue_type || (result.step_state && result.step_state.issue_type);
+
+  if (step && total && issue) {
+    stepProgressRow.style.display = "flex";
+    stepProgressLabel.textContent = `Step ${step} of ${total}`;
+    stepProgressFill.style.width = `${Math.round((step / total) * 100)}%`;
+    stepIssueBadge.textContent = issue;
+  }
+
+  // Hide progress bar if issue was fully resolved
+  if (result.outcome === "resolved") {
+    stepProgressRow.style.display = "none";
+  }
 }
 
 // Connect Button Handler
@@ -328,6 +404,9 @@ function resetUI() {
   if (toolLog) {
     toolLog.innerHTML = "";
   }
+  if (stepProgressRow) {
+    stepProgressRow.style.display = "none";
+  }
   connectBtn.disabled = false;
 }
 
@@ -352,3 +431,14 @@ if (languageSelect) {
     }
   });
 }
+
+// Chip button quick-action handlers
+document.querySelectorAll(".chip[data-cmd]").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    if (!geminiClient.isConnected()) return;
+    const cmd = chip.dataset.cmd;
+    const text = cmd === "escalate" ? "I need to escalate this issue to a human agent." : cmd;
+    geminiClient.sendText(text);
+    appendMessage("user", text);
+  });
+});

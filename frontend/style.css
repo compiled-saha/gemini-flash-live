@@ -290,10 +290,37 @@ video {
 
 .tool-event-body {
   margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
   font-size: 0.75rem;
   color: #3c4043;
+}
+
+.tool-kv-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.tool-kv-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.tool-key {
+  font-weight: 600;
+  color: #5f6368;
+  text-transform: capitalize;
+}
+
+.tool-value {
+  color: #202124;
+  word-break: break-word;
+}
+
+.tool-list {
+  margin: 0;
+  padding-left: 1rem;
 }
 
 .message {
@@ -323,6 +350,90 @@ input[type="text"] {
   border: 1px solid #ddd;
   border-radius: 4px;
 }
+
+.nav-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: #5f6368;
+}
+
+/* Step progress bar */
+.step-progress-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0 6px;
+  border-bottom: 1px solid #e0e0e0;
+  margin-bottom: 8px;
+}
+
+.step-progress-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.step-progress-track {
+  flex: 1;
+  height: 6px;
+  background: #e0e0e0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.step-progress-fill {
+  height: 100%;
+  background: var(--primary-color);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.step-issue-badge {
+  font-size: 0.72rem;
+  background: #e8f0fe;
+  color: #1967d2;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-weight: 600;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+/* Quick-action chip buttons */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chip {
+  padding: 4px 13px;
+  border: 1px solid #dadce0;
+  border-radius: 16px;
+  background: #fff;
+  font-size: 0.8rem;
+  color: var(--primary-color);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  font-family: inherit;
+}
+
+.chip:hover {
+  background: #e8f0fe;
+  border-color: var(--primary-color);
+}
+
+.chip-danger {
+  color: var(--danger-color);
+  border-color: #f5c6c6;
+}
+
+.chip-danger:hover {
+  background: #fce8e6;
+  border-color: var(--danger-color);
+}
+
 .note {
   font-size: 0.8rem;
   color: #666;
