@@ -68,6 +68,14 @@ PRINTER_PATH_STEPS = [
     "If still failing, collect printer name/model, network type (USB/Wi-Fi), and exact error shown, then escalate.",
 ]
 
+OKTA_PATH_STEPS = [
+    "Install the Okta Verify app from your app store.",
+    "Open the app and select Add Account.",
+    "Scan the QR code shown on your computer screen.",
+    "Confirm setup in the app.",
+    "Use Okta Verify for login approvals on your new device.",
+]
+
 GENERAL_IT_PATH_STEPS = [
     "Ask the caller to describe the exact symptom, error text, and when it started.",
     "Ask what changed recently (password update, new software, network/location change, or device restart).",
@@ -80,7 +88,7 @@ GENERAL_IT_PATH_STEPS = [
 
 HELPDESK_ESCALATION = "Please contact IT Helpdesk for manual assistance."
 MAX_EMPLOYEE_ID_ATTEMPTS = 3
-SUPPORTED_ISSUES = ["password", "citrix", "vpn", "outlook", "printer", "general"]
+SUPPORTED_ISSUES = ["password", "citrix", "vpn", "outlook", "printer", "okta", "general"]
 
 ISSUE_STEPS_MAP = {
     "password": PASSWORD_PATH_STEPS,
@@ -88,6 +96,7 @@ ISSUE_STEPS_MAP = {
     "vpn": VPN_PATH_STEPS,
     "outlook": OUTLOOK_PATH_STEPS,
     "printer": PRINTER_PATH_STEPS,
+    "okta": OKTA_PATH_STEPS,
     "general": GENERAL_IT_PATH_STEPS,
 }
 
@@ -132,6 +141,14 @@ def get_printer_support_path():
     }
 
 
+def get_okta_support_path():
+    return {
+        "issue_type": "okta",
+        "steps": OKTA_PATH_STEPS,
+        "escalation": HELPDESK_ESCALATION,
+    }
+
+
 def get_general_support_path():
     return {
         "issue_type": "general",
@@ -142,13 +159,14 @@ def get_general_support_path():
 
 def get_all_support_paths_summary():
     return {
-        "issue_types": ["password", "citrix", "vpn", "outlook", "printer", "general"],
+        "issue_types": ["password", "citrix", "vpn", "outlook", "printer", "okta", "general"],
         "summary": {
             "password": "Check if account is locked, use self-service password reset portal, clear browser credentials, or contact IT to unlock.",
             "citrix": "Verify internet, check StoreFront URL and AD credentials, update or reset Citrix Workspace, try browser access.",
             "vpn": "Verify internet and VPN server address, confirm AD credentials and MFA, check firewall settings, update VPN client.",
             "outlook": "Check network and Offline mode, re-authenticate if password expired, clear Outbox, repair data file, or contact IT for mailbox issues.",
             "printer": "Guide printer setup and test print using Windows printer settings, queue cleanup, and re-add flow.",
+            "okta": "Guide Okta Verify setup on a new device: install app, add account, scan QR, confirm setup, and verify approval prompts.",
             "general": "Handle other IT issues with symptom-driven guided troubleshooting and escalation if unresolved.",
         },
         "escalation": HELPDESK_ESCALATION,
@@ -190,6 +208,7 @@ def classify_support_intent(user_text: str):
         "vpn": ["vpn", "network tunnel", "secure connect"],
         "outlook": ["outlook", "email", "mail", "inbox", "outbox", "smtp", "exchange"],
         "printer": ["printer", "print", "printing", "print queue", "add printer", "configure printer", "set default printer", "driver"],
+        "okta": ["okta", "okta verify", "mfa", "2fa", "two factor", "qr", "scan code", "add account"],
     }
 
     scores = {issue: 0 for issue in issue_keywords}
@@ -249,6 +268,8 @@ Extra rules:
 - Wait for the user to confirm before moving to the next step.
 - If user says yes / it worked / resolved: call confirm_step_outcome with outcome=resolved.
 - If user says no / still broken / didn't work: call confirm_step_outcome with outcome=not_resolved, then call navigate_support_step with command=next.
+- If user provides detailed negative feedback (blocked, unclear, already did, wrong step), call analyze_step_feedback with the exact user text and follow its recommended_command.
+- If analyze_step_feedback returns recommended_command=escalate, call get_smart_escalation_summary immediately.
 - If confirm_step_outcome returns all_steps_exhausted=true, call get_smart_escalation_summary immediately.
 - Always read back the ticket_id from get_smart_escalation_summary so the caller can note it down.
 - If user asks for all options, call tool get_all_support_paths_summary and summarize briefly.
@@ -257,6 +278,7 @@ Extra rules:
 - When user selects VPN login issue, call tool get_vpn_support_path.
 - When user selects Outlook issue, call tool get_outlook_support_path.
 - When user asks to configure printer or fix printing, call tool get_printer_support_path.
+- When user asks for Okta setup or Okta Verify setup, call tool get_okta_support_path.
 - For any other IT issue, call tool get_general_support_path.
 - After tool result, guide the user through steps one by one and use tool escalation message when needed.
 - If user asks for escalation or issue remains unresolved, call get_smart_escalation_summary.
@@ -312,7 +334,7 @@ class GeminiLive:
                     },
                     {
                         "name": "classify_support_intent",
-                        "description": "Classifies user issue intent into password, citrix, vpn, outlook, printer, general, handoff, or unknown.",
+                        "description": "Classifies user issue intent into password, citrix, vpn, outlook, printer, okta, general, handoff, or unknown.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -332,7 +354,7 @@ class GeminiLive:
                             "properties": {
                                 "issue_type": {
                                     "type": "string",
-                                    "description": "One of: password, citrix, vpn, outlook, printer, general"
+                                    "description": "One of: password, citrix, vpn, outlook, printer, okta, general"
                                 }
                             },
                             "required": ["issue_type"],
@@ -380,6 +402,20 @@ class GeminiLive:
                         },
                     },
                     {
+                        "name": "analyze_step_feedback",
+                        "description": "Analyzes user feedback for the current troubleshooting step and recommends next action: next, repeat, back, status, or escalate.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "user_text": {
+                                    "type": "string",
+                                    "description": "User feedback in natural language after trying a troubleshooting step."
+                                }
+                            },
+                            "required": ["user_text"],
+                        },
+                    },
+                    {
                         "name": "get_password_support_path",
                         "description": "Returns the approved troubleshooting steps for password login issues.",
                         "parameters": {
@@ -420,8 +456,16 @@ class GeminiLive:
                         },
                     },
                     {
+                        "name": "get_okta_support_path",
+                        "description": "Returns approved Okta Verify setup steps for new-device authentication setup.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
                         "name": "get_general_support_path",
-                        "description": "Returns generic IT troubleshooting steps for issues outside password, citrix, vpn, or outlook.",
+                        "description": "Returns generic IT troubleshooting steps for issues outside password, citrix, vpn, outlook, printer, or okta.",
                         "parameters": {
                             "type": "object",
                             "properties": {},
@@ -429,7 +473,7 @@ class GeminiLive:
                     },
                     {
                         "name": "get_all_support_paths_summary",
-                        "description": "Returns a short summary for all support paths: password, citrix, vpn, outlook, printer, and general.",
+                        "description": "Returns a short summary for all support paths: password, citrix, vpn, outlook, printer, okta, and general.",
                         "parameters": {
                             "type": "object",
                             "properties": {},
@@ -444,12 +488,14 @@ class GeminiLive:
             "start_step_navigation": self._start_step_navigation,
             "navigate_support_step": self._navigate_support_step,
             "confirm_step_outcome": self._confirm_step_outcome,
+            "analyze_step_feedback": self._analyze_step_feedback,
             "get_smart_escalation_summary": self._get_smart_escalation_summary,
             "get_password_support_path": self._get_password_support_path,
             "get_citrix_support_path": self._get_citrix_support_path,
             "get_vpn_support_path": self._get_vpn_support_path,
             "get_outlook_support_path": self._get_outlook_support_path,
             "get_printer_support_path": self._get_printer_support_path,
+            "get_okta_support_path": self._get_okta_support_path,
             "get_general_support_path": self._get_general_support_path,
             "get_all_support_paths_summary": self._get_all_support_paths_summary,
         }
@@ -494,7 +540,7 @@ class GeminiLive:
         if normalized not in ISSUE_STEPS_MAP:
             return {
                 "error": "UNSUPPORTED_ISSUE_TYPE",
-                "message": "Supported issue types are password, citrix, vpn, outlook, printer, and general.",
+                "message": "Supported issue types are password, citrix, vpn, outlook, printer, okta, and general.",
                 "supported_issue_types": list(ISSUE_STEPS_MAP.keys()),
             }
 
@@ -670,6 +716,100 @@ class GeminiLive:
                 "next_action": "Call get_smart_escalation_summary to generate a ticket.",
             }
 
+    def _analyze_step_feedback(self, user_text: str):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        if not self.current_issue_type or self.current_issue_type not in ISSUE_STEPS_MAP:
+            return {
+                "error": "NO_ACTIVE_ISSUE",
+                "message": "No active issue navigation. Call start_step_navigation first.",
+            }
+
+        text = str(user_text or "").strip().lower()
+        normalized_text = unicodedata.normalize("NFKD", text)
+        normalized_text = normalized_text.encode("ascii", "ignore").decode("ascii")
+        normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+
+        steps = ISSUE_STEPS_MAP[self.current_issue_type]
+        step_number = self.current_step_index + 1
+        total_steps = len(steps)
+
+        outcome = self._normalize_step_outcome(normalized_text)
+
+        repeat_markers = [
+            "repeat", "again", "not clear", "didnt understand", "didn't understand",
+            "explain", "confused", "samajh", "samjh", "kya karu", "what should i do",
+        ]
+        back_markers = ["back", "previous", "last step", "pehle", "prior step", "undo"]
+        next_markers = ["already did", "done this", "next", "completed", "ho gaya", "tried this"]
+        escalate_markers = [
+            "cannot", "can't", "unable", "blocked", "no access", "permission", "not allowed",
+            "admin required", "policy", "device lost", "account locked", "error code",
+            "still fails", "fails every time",
+        ]
+
+        def has_any(markers):
+            return any(m in normalized_text for m in markers)
+
+        if outcome == "resolved":
+            return {
+                "employee_id": self.validated_employee_id,
+                "issue_type": self.current_issue_type,
+                "step_number": step_number,
+                "total_steps": total_steps,
+                "outcome": "resolved",
+                "recommended_command": "status",
+                "reason": "User feedback indicates the issue is resolved.",
+                "next_action": "Call confirm_step_outcome with outcome=resolved.",
+            }
+
+        recommended_command = "next"
+        reason = "Default progression for unresolved feedback."
+        coaching_tip = ""
+
+        if has_any(back_markers):
+            recommended_command = "back"
+            reason = "User requested to return to the previous step."
+        elif has_any(repeat_markers):
+            recommended_command = "repeat"
+            reason = "User asked for clarification or repetition."
+        elif has_any(next_markers):
+            recommended_command = "next"
+            reason = "User already completed the current step and wants to continue."
+        elif has_any(escalate_markers) and self.current_step_index >= max(1, total_steps - 2):
+            recommended_command = "escalate"
+            reason = "User remains blocked near end of flow; escalation is appropriate."
+
+        # Okta-specific blocker handling to make negative paths actionable.
+        if self.current_issue_type == "okta":
+            if self.current_step_index == 2 and any(x in normalized_text for x in ["qr", "scan", "code", "barcode"]):
+                recommended_command = "repeat"
+                reason = "QR scan blocker detected on Okta setup step."
+                coaching_tip = "Ask user to refresh/regenerate QR code on computer, increase screen brightness, or use manual setup code if available."
+            elif self.current_step_index == 0 and any(x in normalized_text for x in ["install", "store", "download", "not available"]):
+                coaching_tip = "Confirm phone OS and app store access, then verify the official app name is Okta Verify."
+            elif self.current_step_index == 1 and any(x in normalized_text for x in ["add account", "option missing", "cannot find"]):
+                coaching_tip = "Ask user to update Okta Verify app and reopen it; then check for Add Account on home screen/menu."
+            elif self.current_step_index == 4 and any(x in normalized_text for x in ["approval", "push", "notification", "not receiving"]):
+                coaching_tip = "Check notification permissions, internet connectivity, and device date/time sync before retrying approval."
+
+        suggested_outcome = "not_resolved" if outcome != "resolved" else "resolved"
+        return {
+            "employee_id": self.validated_employee_id,
+            "issue_type": self.current_issue_type,
+            "step_number": step_number,
+            "total_steps": total_steps,
+            "outcome": suggested_outcome,
+            "recommended_command": recommended_command,
+            "reason": reason,
+            "coaching_tip": coaching_tip,
+            "next_action": (
+                "Call get_smart_escalation_summary."
+                if recommended_command == "escalate"
+                else f"Call confirm_step_outcome with outcome=not_resolved, then call navigate_support_step with command={recommended_command}."
+            ),
+        }
+
     def _navigate_support_step(self, command: str):
         if not self.validated_employee_id:
             return self._validation_required_response()
@@ -810,6 +950,15 @@ class GeminiLive:
         self._set_issue_state("printer")
         result["employee_id"] = self.validated_employee_id
         result["step_state"] = self._get_step_state_payload("printer", self.current_step_index)
+        return result
+
+    def _get_okta_support_path(self):
+        if not self.validated_employee_id:
+            return self._validation_required_response()
+        result = get_okta_support_path()
+        self._set_issue_state("okta")
+        result["employee_id"] = self.validated_employee_id
+        result["step_state"] = self._get_step_state_payload("okta", self.current_step_index)
         return result
 
     def _get_general_support_path(self):
