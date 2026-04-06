@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import logging
 import re
 import traceback
@@ -264,10 +265,12 @@ Extra rules:
 - For user commands like next, repeat, back, skip, start over, call navigate_support_step.
 - Do not repeat the navigation command list in every response.
 - Mention navigation commands only once when starting step navigation, or if user asks for help.
-- After presenting each troubleshooting step, always ask: "Were you able to try that? Did it resolve your issue?"
-- Wait for the user to confirm before moving to the next step.
-- If user says yes / it worked / resolved: call confirm_step_outcome with outcome=resolved.
-- If user says no / still broken / didn't work: call confirm_step_outcome with outcome=not_resolved, then call navigate_support_step with command=next.
+- After presenting a step, pause and let the user respond naturally.
+- Do not force the exact same confirmation question after every step.
+- Use varied, natural follow-ups such as "Take your time; tell me what you see", "What happened after that?", or "Would you like to continue to the next step?"
+- If user explicitly says the issue is fixed/resolved, call confirm_step_outcome with outcome=resolved.
+- If user gives negative/blocked/unclear feedback, call analyze_step_feedback and follow recommended_command.
+- If user says next/back/repeat/start over directly, execute navigate_support_step without extra confirmation prompts.
 - If user provides detailed negative feedback (blocked, unclear, already did, wrong step), call analyze_step_feedback with the exact user text and follow its recommended_command.
 - If analyze_step_feedback returns recommended_command=escalate, call get_smart_escalation_summary immediately.
 - If confirm_step_outcome returns all_steps_exhausted=true, call get_smart_escalation_summary immediately.
@@ -389,7 +392,7 @@ class GeminiLive:
                     },
                     {
                         "name": "confirm_step_outcome",
-                        "description": "Records whether the current troubleshooting step resolved the issue. Call this after the user says yes or no to 'Did that work?'",
+                        "description": "Records explicit final step outcome when the user clearly confirms resolved or not resolved.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -403,7 +406,7 @@ class GeminiLive:
                     },
                     {
                         "name": "analyze_step_feedback",
-                        "description": "Analyzes user feedback for the current troubleshooting step and recommends next action: next, repeat, back, status, or escalate.",
+                        "description": "Analyzes natural user feedback and recommends next action: next, repeat, back, status, or escalate.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -716,6 +719,68 @@ class GeminiLive:
                 "next_action": "Call get_smart_escalation_summary to generate a ticket.",
             }
 
+    def _llm_feedback_decision(self, user_text: str, step_text: str, step_number: int, total_steps: int):
+        """Optional LLM decision for ambiguous feedback. Returns None on any failure."""
+        prompt = (
+            "You are an IT helpdesk flow controller. "
+            "Given user feedback after a troubleshooting step, choose the single best next command.\n"
+            "Allowed commands: next, repeat, back, start_over, status, escalate.\n"
+            "Return strict JSON with keys: recommended_command, outcome, confidence, reason, coaching_tip, can_proceed_next.\n"
+            "outcome must be one of: resolved, not_resolved, unknown.\n"
+            "can_proceed_next must be true if user can continue, false if blocked on prerequisite/current step.\n"
+            f"Current step: {step_number}/{total_steps}.\n"
+            f"Step text: {step_text}\n"
+            f"User feedback: {user_text}"
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw = (response.text or "").strip()
+            data = json.loads(raw)
+            cmd = str(data.get("recommended_command", "")).strip().lower()
+            if cmd not in {"next", "repeat", "back", "start_over", "status", "escalate"}:
+                return None
+            return {
+                "recommended_command": cmd,
+                "outcome": str(data.get("outcome", "unknown")).strip().lower(),
+                "confidence": float(data.get("confidence", 0.0) or 0.0),
+                "reason": str(data.get("reason", "LLM decision")),
+                "coaching_tip": str(data.get("coaching_tip", "")),
+                "can_proceed_next": bool(data.get("can_proceed_next", True)),
+            }
+        except Exception:
+            return None
+
+    def _step_keywords(self, step_text: str):
+        stopwords = {
+            "the", "and", "for", "with", "that", "this", "your", "from", "into", "then", "when", "what",
+            "have", "been", "will", "just", "step", "please", "open", "check", "confirm", "make", "sure",
+            "click", "select", "try", "use", "able", "cannot", "cant", "not", "still", "again", "issue",
+        }
+        tokens = re.findall(r"[a-z0-9]+", (step_text or "").lower())
+        return {t for t in tokens if len(t) >= 4 and t not in stopwords}
+
+    def _build_interactive_response_hint(self, command: str, coaching_tip: str = "") -> str:
+        prompts = {
+            "next": "Great, let's continue to the next step.",
+            "repeat": "No problem. Let me explain that step in a clearer way.",
+            "back": "Sure, let's go back one step.",
+            "status": "Thanks for the update. Here's where we are in the flow.",
+            "start_over": "Absolutely, let's restart from step one.",
+            "escalate": "I understand. I'll escalate this so IT can help directly.",
+        }
+        base = prompts.get(command, "Thanks for the update.")
+        if coaching_tip:
+            return f"{base} {coaching_tip}"
+        return base
+
     def _analyze_step_feedback(self, user_text: str):
         if not self.validated_employee_id:
             return self._validation_required_response()
@@ -725,33 +790,50 @@ class GeminiLive:
                 "message": "No active issue navigation. Call start_step_navigation first.",
             }
 
-        text = str(user_text or "").strip().lower()
-        normalized_text = unicodedata.normalize("NFKD", text)
+        text = str(user_text or "").strip()
+        normalized_text = unicodedata.normalize("NFKD", text.lower())
         normalized_text = normalized_text.encode("ascii", "ignore").decode("ascii")
+        normalized_text = normalized_text.replace("didn't", "didnt").replace("can't", "cant")
         normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
 
         steps = ISSUE_STEPS_MAP[self.current_issue_type]
         step_number = self.current_step_index + 1
         total_steps = len(steps)
+        step_text = steps[self.current_step_index] if steps else ""
+        next_step_text = steps[self.current_step_index + 1] if self.current_step_index < len(steps) - 1 else ""
+        current_step_keywords = self._step_keywords(step_text)
+        next_step_keywords = self._step_keywords(next_step_text)
 
         outcome = self._normalize_step_outcome(normalized_text)
 
-        repeat_markers = [
-            "repeat", "again", "not clear", "didnt understand", "didn't understand",
-            "explain", "confused", "samajh", "samjh", "kya karu", "what should i do",
-        ]
-        back_markers = ["back", "previous", "last step", "pehle", "prior step", "undo"]
-        next_markers = ["already did", "done this", "next", "completed", "ho gaya", "tried this"]
-        escalate_markers = [
-            "cannot", "can't", "unable", "blocked", "no access", "permission", "not allowed",
-            "admin required", "policy", "device lost", "account locked", "error code",
-            "still fails", "fails every time",
-        ]
+        command_patterns = {
+            "start_over": ["start over", "restart", "from beginning"],
+            "status": ["status", "where are we", "which step"],
+            "back": ["back", "previous", "last step", "go back"],
+            "repeat": ["repeat", "again", "not clear", "explain again", "confused"],
+            "next": ["next", "continue", "already did", "done this", "completed"],
+        }
+        detected_command = None
+        for cmd, patterns in command_patterns.items():
+            if any(p in normalized_text for p in patterns):
+                detected_command = cmd
+                break
 
-        def has_any(markers):
-            return any(m in normalized_text for m in markers)
+        urgent_escalation = any(
+            p in normalized_text
+            for p in ["device lost", "phone lost", "stolen", "compromised account", "suspicious login", "security issue"]
+        )
+
+        blocker_markers = ["cant", "cannot", "unable", "blocked", "no access", "permission", "not allowed", "error code"]
+        strong_blocker = any(p in normalized_text for p in blocker_markers)
+        completion_markers = ["tried", "attempted", "already did", "done", "completed", "followed", "finished"]
+        explicit_completion = any(p in normalized_text for p in completion_markers)
+        mentions_current_step = any(k in normalized_text for k in current_step_keywords) if current_step_keywords else False
+        mentions_next_step = any(k in normalized_text for k in next_step_keywords) if next_step_keywords else False
+        blocked_on_current_step = strong_blocker and (mentions_current_step or not mentions_next_step)
 
         if outcome == "resolved":
+            assistant_prompt = self._build_interactive_response_hint("status")
             return {
                 "employee_id": self.validated_employee_id,
                 "issue_type": self.current_issue_type,
@@ -760,40 +842,63 @@ class GeminiLive:
                 "outcome": "resolved",
                 "recommended_command": "status",
                 "reason": "User feedback indicates the issue is resolved.",
+                "assistant_prompt": assistant_prompt,
                 "next_action": "Call confirm_step_outcome with outcome=resolved.",
             }
 
-        recommended_command = "next"
-        reason = "Default progression for unresolved feedback."
+        recommended_command = detected_command or "repeat"
+        reason = "User feedback needs clarification before moving forward."
         coaching_tip = ""
+        confidence = 0.55
 
-        if has_any(back_markers):
-            recommended_command = "back"
-            reason = "User requested to return to the previous step."
-        elif has_any(repeat_markers):
+        if urgent_escalation:
+            recommended_command = "escalate"
+            reason = "Security-critical blocker detected; immediate escalation required."
+            confidence = 0.95
+        elif detected_command:
+            reason = f"User explicitly requested '{detected_command}'."
+            confidence = 0.85
+        elif blocked_on_current_step:
             recommended_command = "repeat"
-            reason = "User asked for clarification or repetition."
-        elif has_any(next_markers):
-            recommended_command = "next"
-            reason = "User already completed the current step and wants to continue."
-        elif has_any(escalate_markers) and self.current_step_index >= max(1, total_steps - 2):
+            reason = "User appears blocked on the current step prerequisite; do not move ahead yet."
+            confidence = 0.88
+            coaching_tip = "Let's finish this step first before moving forward."
+        elif outcome == "not_resolved":
+            if explicit_completion:
+                recommended_command = "next"
+                reason = "User attempted the current step and it did not resolve the issue."
+                confidence = 0.82
+            else:
+                recommended_command = "repeat"
+                reason = "Negative feedback is unclear on whether the step was fully attempted."
+                confidence = 0.72
+        elif strong_blocker and self.current_step_index >= max(1, total_steps - 2):
             recommended_command = "escalate"
             reason = "User remains blocked near end of flow; escalation is appropriate."
+            confidence = 0.82
 
-        # Okta-specific blocker handling to make negative paths actionable.
-        if self.current_issue_type == "okta":
-            if self.current_step_index == 2 and any(x in normalized_text for x in ["qr", "scan", "code", "barcode"]):
-                recommended_command = "repeat"
-                reason = "QR scan blocker detected on Okta setup step."
-                coaching_tip = "Ask user to refresh/regenerate QR code on computer, increase screen brightness, or use manual setup code if available."
-            elif self.current_step_index == 0 and any(x in normalized_text for x in ["install", "store", "download", "not available"]):
-                coaching_tip = "Confirm phone OS and app store access, then verify the official app name is Okta Verify."
-            elif self.current_step_index == 1 and any(x in normalized_text for x in ["add account", "option missing", "cannot find"]):
-                coaching_tip = "Ask user to update Okta Verify app and reopen it; then check for Add Account on home screen/menu."
-            elif self.current_step_index == 4 and any(x in normalized_text for x in ["approval", "push", "notification", "not receiving"]):
-                coaching_tip = "Check notification permissions, internet connectivity, and device date/time sync before retrying approval."
+        # Ask LLM only when confidence is low and user provided meaningful natural text.
+        if confidence < 0.75 and len(normalized_text.split()) >= 4:
+            llm_choice = self._llm_feedback_decision(text, step_text, step_number, total_steps)
+            if llm_choice and llm_choice.get("recommended_command") in {"next", "repeat", "back", "start_over", "status", "escalate"}:
+                llm_command = llm_choice["recommended_command"]
+                can_proceed_next = bool(llm_choice.get("can_proceed_next", True))
+
+                # Safety: never move next if either heuristic or LLM sees prerequisite blockers.
+                if llm_command == "next" and (blocked_on_current_step or not can_proceed_next):
+                    llm_command = "repeat"
+                    llm_choice["reason"] = "User appears blocked on current prerequisite; repeating current step guidance first."
+
+                recommended_command = llm_command
+                llm_outcome = llm_choice.get("outcome", "unknown")
+                if llm_outcome in {"resolved", "not_resolved"}:
+                    outcome = llm_outcome
+                reason = llm_choice.get("reason", reason)
+                coaching_tip = llm_choice.get("coaching_tip", coaching_tip)
+                confidence = max(confidence, float(llm_choice.get("confidence", 0.0) or 0.0))
 
         suggested_outcome = "not_resolved" if outcome != "resolved" else "resolved"
+        assistant_prompt = self._build_interactive_response_hint(recommended_command, coaching_tip)
         return {
             "employee_id": self.validated_employee_id,
             "issue_type": self.current_issue_type,
@@ -802,11 +907,13 @@ class GeminiLive:
             "outcome": suggested_outcome,
             "recommended_command": recommended_command,
             "reason": reason,
+            "confidence": round(float(confidence), 2),
             "coaching_tip": coaching_tip,
+            "assistant_prompt": assistant_prompt,
             "next_action": (
                 "Call get_smart_escalation_summary."
                 if recommended_command == "escalate"
-                else f"Call confirm_step_outcome with outcome=not_resolved, then call navigate_support_step with command={recommended_command}."
+                else f"Call navigate_support_step with command={recommended_command}."
             ),
         }
 
