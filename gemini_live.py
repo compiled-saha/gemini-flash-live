@@ -91,6 +91,11 @@ HELPDESK_ESCALATION = "Please contact IT Helpdesk for manual assistance."
 MAX_EMPLOYEE_ID_ATTEMPTS = 3
 SUPPORTED_ISSUES = ["password", "citrix", "vpn", "outlook", "printer", "okta", "general"]
 
+EMP_ID_TO_NAME = {
+    "703343451": "Subhajit Saha",
+    "703013542": "Ravi Chaganti"
+}
+
 ISSUE_STEPS_MAP = {
     "password": PASSWORD_PATH_STEPS,
     "citrix": CITRIX_PATH_STEPS,
@@ -176,11 +181,18 @@ def get_all_support_paths_summary():
 
 def validate_employee_id(employee_id: str):
     cleaned = re.sub(r"\D", "", str(employee_id or ""))
-    is_valid = len(cleaned) == 4
+    is_valid = len(cleaned) == 9
+    if is_valid:
+        name = EMP_ID_TO_NAME.get(cleaned, f"Employee {cleaned}")
+        message = f"Employee ID verified. Welcome, {name}."
+    else:
+        name = None
+        message = "Invalid employee ID. Please provide a 9-digit employee ID."
     return {
         "is_valid": is_valid,
         "employee_id": cleaned if is_valid else None,
-        "message": "Employee ID verified." if is_valid else "Invalid employee ID. Please provide a 4-digit employee ID.",
+        "name": name,
+        "message": message,
     }
 
 
@@ -248,7 +260,7 @@ Conversation flow:
 1) Start with: "Thank you for calling. Please say your employee ID."
 2) Validate the employee ID by calling tool validate_employee_id.
 3) If validation fails, ask for employee ID again and do not continue.
-4) After successful validation, confirm with: "Thank you for providing employee ID <ID>. How can I help you today?" and wait for the user to describe their issue.
+4) After successful validation, confirm with: "Thank you, <name>. How can I help you today?" and wait for the user to describe their issue.
 
 Extra rules:
 - Supported reply languages are: English, Hindi, German, Spanish.
@@ -312,18 +324,25 @@ class GeminiLive:
         )
         self.validated_employee_id = None
         self.employee_id_attempts = 0
+        self.validated_name = None
         self.current_issue_type = None
         self.current_step_index = 0
         self.visited_step_indexes = set()
         self.step_outcomes = {}  # {step_index: "resolved" | "not_resolved"}
         self.ticket_id = None
         self.active_language = "English"
+        self.conversation_history = []
+        self.max_conversation_history = 30
+        self.session_restart_summary = ""
+        self.session_restart_count = 0
+        self.turns_since_restart = 0
+        self.max_live_turns_before_restart = 8
         self.tools = tools or [
             {
                 "function_declarations": [
                     {
                         "name": "validate_employee_id",
-                        "description": "Validates a caller employee ID. Only 4-digit numeric IDs are accepted.",
+                        "description": "Validates a caller employee ID. Only 9-digit numeric IDs are accepted.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -508,6 +527,51 @@ class GeminiLive:
         self.current_step_index = 0
         self.visited_step_indexes = {0}
 
+    def _append_history(self, role: str, text: str):
+        if not text or not isinstance(text, str):
+            return
+        self.conversation_history.append({"role": role, "text": text.strip()})
+        if len(self.conversation_history) > self.max_conversation_history:
+            self.conversation_history.pop(0)
+
+    def _trim_snippet(self, text: str, max_length: int = 120) -> str:
+        text = " ".join(str(text or "").split())
+        return text if len(text) <= max_length else text[: max_length - 3].rstrip() + "..."
+
+    def _summarize_conversation(self, max_chars: int = 400) -> str:
+        parts = []
+        if self.session_restart_summary:
+            parts.append(self.session_restart_summary.strip())
+
+        if self.validated_employee_id and self.validated_name:
+            parts.append(f"Employee {self.validated_name} ({self.validated_employee_id}) is verified.")
+        elif self.validated_employee_id:
+            parts.append(f"Employee ID {self.validated_employee_id} is verified.")
+
+        if self.current_issue_type:
+            total_steps = len(ISSUE_STEPS_MAP.get(self.current_issue_type, []))
+            parts.append(
+                f"Current issue type is {self.current_issue_type}, at step {self.current_step_index + 1} of {total_steps}."
+            )
+
+        recent = []
+        for item in self.conversation_history[-6:]:
+            role = "User" if item["role"] == "user" else "Assistant"
+            recent.append(f"{role}: {self._trim_snippet(item['text'], 80)}")
+        if recent:
+            parts.append("Recent exchange: " + " | ".join(recent))
+
+        summary = " ".join(parts).strip()
+        if len(summary) > max_chars:
+            return summary[:max_chars - 3].rstrip() + "..."
+        return summary
+
+    def _build_system_instruction(self) -> str:
+        summary = self._summarize_conversation()
+        if summary:
+            return f"{IT_SUPPORT_SYSTEM_INSTRUCTION}\n\nConversation summary: {summary}"
+        return IT_SUPPORT_SYSTEM_INSTRUCTION
+
     def _get_step_state_payload(self, issue_type: str, step_index: int):
         steps = ISSUE_STEPS_MAP[issue_type]
         step_index = max(0, min(step_index, len(steps) - 1))
@@ -525,7 +589,7 @@ class GeminiLive:
         return {
             "error": "EMPLOYEE_ID_REQUIRED",
             "message": "Employee ID verification is required before troubleshooting.",
-            "next_action": "Ask caller for a 4-digit employee ID and call validate_employee_id.",
+            "next_action": "Ask caller for a 9-digit employee ID and call validate_employee_id.",
         }
 
     def _classify_support_intent(self, user_text: str):
@@ -994,6 +1058,7 @@ class GeminiLive:
         result = validate_employee_id(employee_id)
         if result["is_valid"]:
             self.validated_employee_id = result["employee_id"]
+            self.validated_name = result["name"]
             self.employee_id_attempts = 0
             result["attempts_used"] = 0
             result["attempts_remaining"] = MAX_EMPLOYEE_ID_ATTEMPTS
@@ -1085,199 +1150,235 @@ class GeminiLive:
         return result
 
     async def start_session(self, audio_input_queue, video_input_queue, text_input_queue, audio_output_callback, audio_interrupt_callback=None):
-        config = types.LiveConnectConfig(
-            response_modalities=[types.Modality.AUDIO],
-            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Puck"
+        while True:
+            session_restart_event = asyncio.Event()
+            resource_exhausted_restart = False
+
+            config = types.LiveConnectConfig(
+                response_modalities=[types.Modality.AUDIO],
+                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name="Puck"
+                        )
                     )
-                )
-            ),
-            context_window_compression=types.ContextWindowCompressionConfig(
-                trigger_tokens=104857,
-                sliding_window=types.SlidingWindow(target_tokens=52428),
-            ),
-            system_instruction=types.Content(parts=[types.Part(text=IT_SUPPORT_SYSTEM_INSTRUCTION)]),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            realtime_input_config=types.RealtimeInputConfig(
-                turn_coverage=types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
-            ),
-            tools=self.tools,
-        )
-        
-        
-        logger.info(f"Connecting to Gemini Live with model={self.model}")
-        try:
-          async with self.client.aio.live.connect(model=self.model, config=config) as session:
-            logger.info("Gemini Live session opened successfully")
-            
-            async def send_audio():
-                try:
-                    while True:
-                        chunk = await audio_input_queue.get()
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={self.input_sample_rate}")
-                        )
-                except asyncio.CancelledError:
-                    logger.debug("send_audio task cancelled")
-                except Exception as e:
-                    logger.error(f"send_audio error: {e}\n{traceback.format_exc()}")
+                ),
+                context_window_compression=types.ContextWindowCompressionConfig(
+                    trigger_tokens=16384,
+                    sliding_window=types.SlidingWindow(target_tokens=8192),
+                ),
+                system_instruction=types.Content(parts=[types.Part(text=self._build_system_instruction())]),
+                input_audio_transcription=types.AudioTranscriptionConfig(),
+                output_audio_transcription=types.AudioTranscriptionConfig(),
+                realtime_input_config=types.RealtimeInputConfig(
+                    turn_coverage=types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
+                ),
+                tools=self.tools,
+            )
 
-            async def send_video():
-                try:
-                    while True:
-                        chunk = await video_input_queue.get()
-                        logger.info(f"Sending video frame to Gemini: {len(chunk)} bytes")
-                        await session.send_realtime_input(
-                            video=types.Blob(data=chunk, mime_type="image/jpeg")
-                        )
-                except asyncio.CancelledError:
-                    logger.debug("send_video task cancelled")
-                except Exception as e:
-                    logger.error(f"send_video error: {e}\n{traceback.format_exc()}")
-
-            async def send_text():
-                try:
-                    while True:
-                        text = await text_input_queue.get()
-                        lang_match = re.search(r"LANGUAGE_PREF:\s*([A-Za-z]+)", str(text or ""), flags=re.IGNORECASE)
-                        if lang_match:
-                            self.active_language = lang_match.group(1).capitalize()
-
-                        logger.info(f"Sending text to Gemini: {text}")
-                        await session.send_realtime_input(text=text)
-                except asyncio.CancelledError:
-                    logger.debug("send_text task cancelled")
-                except Exception as e:
-                    logger.error(f"send_text error: {e}\n{traceback.format_exc()}")
-
-            event_queue = asyncio.Queue()
-
-            async def receive_loop():
-                try:
-                    while True:
-                        async for response in session.receive():
-                            logger.debug(f"Received response from Gemini: {response}")
-                            
-                            # Log the raw response type for debugging
-                            if response.go_away:
-                                logger.warning(f"Received GoAway from Gemini: {response.go_away}")
-                            if response.session_resumption_update:
-                                logger.info(f"Session resumption update: {response.session_resumption_update}")
-                            
-                            server_content = response.server_content
-                            tool_call = response.tool_call
-                            
-                            if server_content:
-                                if server_content.model_turn:
-                                    for part in (server_content.model_turn.parts or []):
-                                        if part.inline_data:
-                                            if inspect.iscoroutinefunction(audio_output_callback):
-                                                await audio_output_callback(part.inline_data.data)
-                                            else:
-                                                audio_output_callback(part.inline_data.data)
-                                
-                                if server_content.input_transcription and server_content.input_transcription.text:
-                                    await event_queue.put({"type": "user", "text": server_content.input_transcription.text})
-                                
-                                if server_content.output_transcription and server_content.output_transcription.text:
-                                    await event_queue.put({"type": "gemini", "text": server_content.output_transcription.text})
-                                
-                                if server_content.turn_complete:
-                                    await event_queue.put({"type": "turn_complete"})
-                                
-                                if server_content.interrupted:
-                                    if audio_interrupt_callback:
-                                        if inspect.iscoroutinefunction(audio_interrupt_callback):
-                                            await audio_interrupt_callback()
-                                        else:
-                                            audio_interrupt_callback()
-                                    await event_queue.put({"type": "interrupted"})
-
-                            if tool_call:
-                                function_responses = []
-                                for fc in (tool_call.function_calls or []):
-                                    func_name = fc.name
-                                    if not func_name:
-                                        continue
-                                    args = fc.args or {}
-                                    
-                                    if func_name in self.tool_mapping:
-                                        try:
-                                            tool_func = self.tool_mapping[func_name]
-                                            if inspect.iscoroutinefunction(tool_func):
-                                                result = await tool_func(**args)
-                                            else:
-                                                loop = asyncio.get_running_loop()
-                                                result = await loop.run_in_executor(None, lambda: tool_func(**args))
-                                        except Exception as e:
-                                            result = f"Error: {e}"
-                                        
-                                        function_responses.append(types.FunctionResponse(
-                                            name=func_name,
-                                            id=fc.id,
-                                            response={"result": result}
-                                        ))
-                                        await event_queue.put({"type": "tool_call", "name": func_name, "args": args, "result": result})
-                                
-                                await session.send_tool_response(function_responses=function_responses)
-                        
-                        # session.receive() iterator ended (e.g. after turn_complete) — re-enter to keep listening
-                        logger.debug("Gemini receive iterator completed, re-entering receive loop")
-
-                except asyncio.CancelledError:
-                    logger.debug("receive_loop task cancelled")
-                except Exception as e:
-                    logger.error(f"receive_loop error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-                    error_text = f"{type(e).__name__}: {e}"
-                    error_code = "session_error"
-                    user_message = "The live session ended unexpectedly. Please try again."
-
-                    if "resource has been exhausted" in str(e).lower():
-                        error_code = "resource_exhausted"
-                        user_message = (
-                            "Gemini Live hit a quota or resource limit. "
-                            "Try again in a bit, or retry without camera or screen sharing."
-                        )
-
-                    await event_queue.put(
-                        {
-                            "type": "error",
-                            "code": error_code,
-                            "error": error_text,
-                            "message": user_message,
-                        }
-                    )
-                finally:
-                    logger.info("receive_loop exiting")
-                    await event_queue.put(None)
-
-            send_audio_task = asyncio.create_task(send_audio())
-            send_video_task = asyncio.create_task(send_video())
-            send_text_task = asyncio.create_task(send_text())
-            receive_task = asyncio.create_task(receive_loop())
-
+            logger.info(f"Connecting to Gemini Live with model={self.model}")
             try:
-                while True:
-                    event = await event_queue.get()
-                    if event is None:
-                        break
-                    if isinstance(event, dict) and event.get("type") == "error":
-                        # Just yield the error event, don't raise to keep the stream alive if possible or let caller handle
-                        yield event
-                        break 
-                    yield event
+                async with self.client.aio.live.connect(model=self.model, config=config) as session:
+                    logger.info("Gemini Live session opened successfully")
+
+                    async def send_audio():
+                        try:
+                            while True:
+                                chunk = await audio_input_queue.get()
+                                await session.send_realtime_input(
+                                    audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={self.input_sample_rate}")
+                                )
+                        except asyncio.CancelledError:
+                            logger.debug("send_audio task cancelled")
+                        except Exception as e:
+                            logger.error(f"send_audio error: {e}\n{traceback.format_exc()}")
+
+                    async def send_video():
+                        try:
+                            while True:
+                                chunk = await video_input_queue.get()
+                                logger.info(f"Sending video frame to Gemini: {len(chunk)} bytes")
+                                await session.send_realtime_input(
+                                    video=types.Blob(data=chunk, mime_type="image/jpeg")
+                                )
+                        except asyncio.CancelledError:
+                            logger.debug("send_video task cancelled")
+                        except Exception as e:
+                            logger.error(f"send_video error: {e}\n{traceback.format_exc()}")
+
+                    async def send_text():
+                        try:
+                            while True:
+                                text = await text_input_queue.get()
+                                text_str = str(text or "")
+                                lang_match = re.search(r"LANGUAGE_PREF:\s*([A-Za-z]+)", text_str, flags=re.IGNORECASE)
+                                if lang_match:
+                                    self.active_language = lang_match.group(1).capitalize()
+
+                                if not text_str.startswith("LANGUAGE_PREF:"):
+                                    self.turns_since_restart += 1
+                                    self._append_history("user", text_str)
+
+                                logger.info(f"Sending text to Gemini: {text_str}")
+                                await session.send_realtime_input(text=text_str)
+
+                                if self.turns_since_restart >= self.max_live_turns_before_restart:
+                                    logger.info("Live session reached turn threshold and will restart to preserve context.")
+                                    session_restart_event.set()
+                        except asyncio.CancelledError:
+                            logger.debug("send_text task cancelled")
+                        except Exception as e:
+                            logger.error(f"send_text error: {e}\n{traceback.format_exc()}")
+
+                    event_queue = asyncio.Queue()
+
+                    async def receive_loop():
+                        try:
+                            while True:
+                                if session_restart_event.is_set():
+                                    await event_queue.put({
+                                        "type": "info",
+                                        "message": "Restarting session to preserve context and avoid token limit issues.",
+                                    })
+                                    break
+
+                                async for response in session.receive():
+                                    logger.debug(f"Received response from Gemini: {response}")
+
+                                    if response.go_away:
+                                        logger.warning(f"Received GoAway from Gemini: {response.go_away}")
+                                    if response.session_resumption_update:
+                                        logger.info(f"Session resumption update: {response.session_resumption_update}")
+
+                                    server_content = response.server_content
+                                    tool_call = response.tool_call
+
+                                    if server_content:
+                                        if server_content.model_turn:
+                                            for part in (server_content.model_turn.parts or []):
+                                                if part.inline_data:
+                                                    if inspect.iscoroutinefunction(audio_output_callback):
+                                                        await audio_output_callback(part.inline_data.data)
+                                                    else:
+                                                        audio_output_callback(part.inline_data.data)
+
+                                        if server_content.input_transcription and server_content.input_transcription.text:
+                                            user_text = server_content.input_transcription.text
+                                            self._append_history("user", user_text)
+                                            await event_queue.put({"type": "user", "text": user_text})
+
+                                        if server_content.output_transcription and server_content.output_transcription.text:
+                                            assistant_text = server_content.output_transcription.text
+                                            self._append_history("assistant", assistant_text)
+                                            await event_queue.put({"type": "gemini", "text": assistant_text})
+
+                                        if server_content.turn_complete:
+                                            await event_queue.put({"type": "turn_complete"})
+
+                                        if server_content.interrupted:
+                                            if audio_interrupt_callback:
+                                                if inspect.iscoroutinefunction(audio_interrupt_callback):
+                                                    await audio_interrupt_callback()
+                                                else:
+                                                    audio_interrupt_callback()
+                                            await event_queue.put({"type": "interrupted"})
+
+                                    if tool_call:
+                                        function_responses = []
+                                        for fc in (tool_call.function_calls or []):
+                                            func_name = fc.name
+                                            if not func_name:
+                                                continue
+                                            args = fc.args or {}
+
+                                            if func_name in self.tool_mapping:
+                                                try:
+                                                    tool_func = self.tool_mapping[func_name]
+                                                    if inspect.iscoroutinefunction(tool_func):
+                                                        result = await tool_func(**args)
+                                                    else:
+                                                        loop = asyncio.get_running_loop()
+                                                        result = await loop.run_in_executor(None, lambda: tool_func(**args))
+                                                except Exception as e:
+                                                    result = f"Error: {e}"
+
+                                                function_responses.append(types.FunctionResponse(
+                                                    name=func_name,
+                                                    id=fc.id,
+                                                    response={"result": result}
+                                                ))
+                                                await event_queue.put({"type": "tool_call", "name": func_name, "args": args, "result": result})
+
+                                        await session.send_tool_response(function_responses=function_responses)
+
+                                logger.debug("Gemini receive iterator completed, re-entering receive loop")
+
+                                if session_restart_event.is_set():
+                                    break
+
+                        except asyncio.CancelledError:
+                            logger.debug("receive_loop task cancelled")
+                        except Exception as e:
+                            logger.error(f"receive_loop error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                            error_text = f"{type(e).__name__}: {e}"
+                            error_code = "session_error"
+                            user_message = "The live session ended unexpectedly. Please try again."
+
+                            if "resource has been exhausted" in str(e).lower():
+                                error_code = "resource_exhausted"
+                                user_message = (
+                                    "Gemini Live hit a quota or resource limit. "
+                                    "Try again in a bit, or retry without camera or screen sharing."
+                                )
+                                resource_exhausted_restart = True
+
+                            await event_queue.put(
+                                {
+                                    "type": "error",
+                                    "code": error_code,
+                                    "error": error_text,
+                                    "message": user_message,
+                                }
+                            )
+                        finally:
+                            logger.info("receive_loop exiting")
+                            await event_queue.put(None)
+
+                    send_audio_task = asyncio.create_task(send_audio())
+                    send_video_task = asyncio.create_task(send_video())
+                    send_text_task = asyncio.create_task(send_text())
+                    receive_task = asyncio.create_task(receive_loop())
+
+                    try:
+                        while True:
+                            event = await event_queue.get()
+                            if event is None:
+                                break
+                            if isinstance(event, dict) and event.get("type") == "error":
+                                yield event
+                                break
+                            yield event
+                            if isinstance(event, dict) and event.get("type") == "info" and event.get("message", "").startswith("Restarting session"):
+                                break
+                    finally:
+                        logger.info("Cleaning up Gemini Live session tasks")
+                        send_audio_task.cancel()
+                        send_video_task.cancel()
+                        send_text_task.cancel()
+                        receive_task.cancel()
+            except Exception as e:
+                logger.error(f"Gemini Live session error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                if "resource has been exhausted" in str(e).lower():
+                    resource_exhausted_restart = True
+                raise
             finally:
-                logger.info("Cleaning up Gemini Live session tasks")
-                send_audio_task.cancel()
-                send_video_task.cancel()
-                send_text_task.cancel()
-                receive_task.cancel()
-        except Exception as e:
-            logger.error(f"Gemini Live session error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            raise
-        finally:
-            logger.info("Gemini Live session closed")
+                logger.info("Gemini Live session closed")
+
+            if session_restart_event.is_set() or resource_exhausted_restart:
+                self.session_restart_count += 1
+                self.session_restart_summary = self._summarize_conversation()
+                self.turns_since_restart = 0
+                logger.info(f"Restarting Gemini Live session #{self.session_restart_count} with a shorter context summary.")
+                continue
+            break
